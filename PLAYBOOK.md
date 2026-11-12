@@ -231,21 +231,21 @@ Use it to show the blueprint catalog; use the task for anything you update.
    **Kubernetes Spec**, SPEC TEMPLATE `hello-world`, COMPLETE.
 5. **Deploy.** **Provisioning → Apps → + ADD** → the blueprint → **Setup**: NAME, GROUP (`All Clouds` works),
    **RESOURCE POOL** `<cluster> / hpe-apps` (this one field picks cluster and namespace) → **Configure**: NEXT →
-   **Review**: COMPLETE.
+   **Review**: COMPLETE. The Review step's Deployment Plan stays empty (a preview bug); the deploy still runs.
 6. **Check with kubectl**, not the App status: `kubectl -n hpe-apps get deploy,pods,svc`.
 
 Do **not** use CONFIG TYPE **Git Repository** on 9.1: it reads the repo but applies nothing. Before deploying a
 blueprint again, remove its objects:
 `kubectl -n hpe-apps delete deploy,svc,cm -l app.kubernetes.io/name=hello-world`.
 
-Morpheus 9.1 issues found in the lab (worth an HPE ticket, with the appliance log):
+Morpheus 9.1.0.1 issues found in the lab (worth an HPE ticket, with the appliance log):
 
 | Issue | Log signature | Effect |
 | --- | --- | --- |
 | CONFIG TYPE Git Repository applies nothing | `load spec files error: groovy.lang.MissingMethodException: ... appendSpecFiles() ... (ArrayList, [Ljava.io.File;)` at `KubernetesProvisionService.groovy:6844` | App "succeeds", status Unknown, no objects |
 | Objects not linked to the App | `KubernetesResourceMappingService - mapResult: null` | App status Unknown, empty Resources tab, App delete leaves the objects |
 | Create-only deploy | `409 ... already exists`, `422 ... nodePort ... provided port is already allocated` | Redeploy fails while the objects exist; no updates |
-| Wizard preview crash | `LinkedHashMap cannot be cast to class java.lang.CharSequence` at `KubernetesComputeUtility.groovy:168` | Preview only; the deploy itself continues |
+| Wizard preview crash | `LinkedHashMap cannot be cast to class java.lang.CharSequence` at `KubernetesComputeUtility.groovy:168`, or `HttpApiClient - Error Occurred calling API: null` once per object | Empty Deployment Plan on the Review step; the deploy itself continues |
 
 ## Troubleshooting
 
@@ -285,7 +285,7 @@ Morpheus 9.1 issues found in the lab (worth an HPE ticket, with the appliance lo
 
 | Item | Value |
 | --- | --- |
-| Morpheus appliance | `vmemgr.hpe.lab`, HPE Morpheus 9.1 |
+| Morpheus appliance | `vmemgr.hpe.lab`, HPE Morpheus 9.1.0.1 |
 | Cluster | `k8sfinal`, cloud `HKS-HYBRID`, Kubernetes v1.35.10, Calico; master `hpe-ns-17`, workers `hpe-ns-18`–`20` |
 | Nodes (kit) | `192.168.200.43`, `.49`, `.50`, `.51` (check with `kubectl get nodes -o wide`) |
 | Pod / service CIDR | `172.20.0.0/16` / `172.30.0.0/16` |
@@ -297,8 +297,9 @@ Morpheus 9.1 issues found in the lab (worth an HPE ticket, with the appliance lo
 
 ## What was tested
 
-- **Lab (Morpheus 9.1, cluster k8sfinal):** the Spec Template blueprint deployed Hello World (2/2 on `hpe-ns-19`
-  and `hpe-ns-20`, NodePort 30082); CONFIG TYPE Git Repository applied nothing; a blueprint redeploy failed with
+- **Lab (Morpheus 9.1.0.1, cluster k8sfinal):** from a clean namespace, the Spec Template blueprint deployed Hello
+  World in under a minute (2/2 on `hpe-ns-19` and `hpe-ns-20`, NodePort 30082), with an empty Deployment Plan on the
+  Review step; CONFIG TYPE Git Repository applied nothing; a blueprint redeploy over existing objects failed with
   `already exists`. The task route has not had its first lab run yet.
 - **`morpheus-deploy.sh` and `morpheus/task-script.sh`** against a Kubernetes v1.35.0 API server: apply (namespace
   created and labelled), re-apply over objects created without kubectl as Morpheus does, rollout timeout with
