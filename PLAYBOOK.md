@@ -6,311 +6,288 @@ https://claude.ai/artifact/Kyq5vqXcd4mLdaR2SDZo3t
 
 ## Overview
 
-Two web apps live in GitHub and HPE Morpheus 9.1 deploys them, as Kubernetes Apps, onto the HKS hybrid
-cluster (1 master, 3 workers, Kubernetes v1.35.10). Allow 30–45 minutes the first time and about
-5 minutes per app after that.
+Morpheus deploys both apps by running one Shell Script task on the HKS master over SSH: the task clones
+this repository and applies the specs with kubectl. On Morpheus 9.1 this is the reliable route. The
+Kubernetes App Blueprint route also gets the apps onto the cluster, but Morpheus loses track of them
+(see *Alternative*). Allow 30 minutes the first time and about 2 minutes per deploy after that.
 
-| App | Spec in Git (Morpheus SPEC PATH / CONFIG) | Kubernetes objects | Replicas | Open it at |
+| App | Spec in Git | Kubernetes objects | Replicas | Open it at |
 | --- | --- | --- | --- | --- |
-| HPE Enterprise team page | `apps/hpe-enterprise` / `hpe-enterprise.yaml` | ConfigMap `hpe-enterprise-content`, Deployment and Service `hpe-enterprise` | 2 | `http://<any-node-ip>:30081/` |
-| Hello World | `apps/hello-world` / `hello-world.yaml` | ConfigMap `hello-world-content`, Deployment and Service `hello-world` | 2 | `http://<any-node-ip>:30082/` |
+| HPE Enterprise team page | `apps/hpe-enterprise/hpe-enterprise.yaml` | ConfigMap `hpe-enterprise-content`, Deployment and Service `hpe-enterprise` | 2 | `http://<any-node-ip>:30081/` |
+| Hello World | `apps/hello-world/hello-world.yaml` | ConfigMap `hello-world-content`, Deployment and Service `hello-world` | 2 | `http://<any-node-ip>:30082/` |
 
 - **Repository:** https://github.com/sahilanand07/hks-morpheus-apps, branch `main`.
 - **No image build:** each app is the stock `nginxinc/nginx-unprivileged:1.27-alpine` image with its page and
   nginx config in a ConfigMap. The cluster already pulled this image through the proxy during the kit's validation.
-- **Namespace:** `hpe-apps`, chosen in the Morpheus App wizard. The specs set no namespace themselves.
-- **Security:** pods run as user 101 with a read-only root filesystem and all capabilities dropped. They pass
-  Pod Security `restricted`.
+- **Namespace:** `hpe-apps`, created by the task with Pod Security `restricted`. The specs set no namespace themselves.
+- **Security:** pods run as user 101 with a read-only root filesystem and all capabilities dropped.
 - **Each page shows** the pod that served it, the pod IP, the time and the page version. Refreshing shows the
   Service spreading requests across both pods.
 - **NodePort 30080** stays with the hks-hybrid-kit validation app in namespace `hello`.
 
 ```
- GitHub repo ──► Morpheus Git integration ──► App Blueprints (x2) ──► Morpheus Apps ──► HKS cluster k8s-1
- (Phase 1)       (Phase 2, branch main)       (Phase 4)               (Phase 5)         namespace hpe-apps
-      │                                                                                  hpe-enterprise :30081
-      └──────────── Phase 7: kubectl apply (rolling update, no downtime) ──────────────► hello-world    :30082
-                                                                                               ▲
-                                                     Users: browser, scripts/smoke-test.sh ────┘ (Phase 6)
+ Users / Catalog ──► Morpheus workflow ──► Shell Script task ──SSH──► HKS master (hpe-ns-17)
+ (Phase 2)           (Phase 2)             (Phase 2)                  git clone GitHub (main)
+                                                                      scripts/morpheus-deploy.sh apply all
+                                                                      kubectl apply ──► namespace hpe-apps
+                                                                                         hpe-enterprise :30081
+                                                                                         hello-world    :30082
 ```
 
-The work runs in seven phases: code in GitHub, Git integration, namespace, blueprints, deploy, verify, then update.
+The work runs in four phases: code in GitHub, deploy with a Morpheus task, verify, then update.
 
 ## Prerequisites
 
-Tick each item before Phase 1.
+Tick each item before Phase 2.
 
 - [ ] **Cluster healthy.** On vmemgr, `bash hks.sh validate` ends with `Cluster is healthy.`
-- [ ] **kubectl on the master.** `sudo -i`, then `export KUBECONFIG=/etc/kubernetes/admin.conf`. Or download the
-  kubeconfig from Morpheus: cluster **Actions → View Kube Config**.
-- [ ] **Appliance reaches GitHub.** **Administration → Settings → Proxy Settings** points at `192.168.200.250:888`
-  (kit step 1.2). Test on vmemgr: `curl -sSI -x http://192.168.200.250:888 https://github.com | head -1` prints an
-  HTTP 200 or 301 line.
+- [ ] **SSH from Morpheus to the master.** The user and password or key pair you used in the cluster wizard work
+  for `ssh <user>@<master-ip>`, and that user is root or has passwordless sudo.
+- [ ] **git on the master.** `git --version` works on the master (else `sudo apt-get install -y git`).
+- [ ] **Master reaches GitHub.** On the master: `git ls-remote https://github.com/sahilanand07/hks-morpheus-apps.git main`
+  prints one line (the proxy comes from `/etc/environment`, set by `hks.sh prep`).
 - [ ] **Workers can pull the image.** On a worker: `sudo crictl images | grep nginx-unprivileged` lists
   `1.27-alpine`. If not, `sudo crictl pull docker.io/nginxinc/nginx-unprivileged:1.27-alpine` must succeed.
-- [ ] **NodePorts free.** `kubectl get svc -A | grep -E '3008[12]'` prints nothing.
-- [ ] **Morpheus rights.** Your role can manage Integrations, Library Blueprints, Provisioning Apps and Clusters.
-  The master-tenant admin can.
-- [ ] **Names noted.** The cluster's group, its cloud (`HKS-HYBRID`) and the cluster name (`k8s-1` below; use yours).
+- [ ] **kubectl on the master** for checks: `sudo -i`, then `export KUBECONFIG=/etc/kubernetes/admin.conf`.
+- [ ] **Morpheus rights.** Your role can manage Library Automation (Tasks, Workflows) and, for self-service,
+  Catalog Items. The master-tenant admin can.
 
 ## Phase 1 — Code in GitHub
 
-The repository is the single source of truth: Morpheus reads each app's spec straight from it, and a GitHub
+The repository is the single source of truth: the Morpheus task clones it on every run, and a GitHub
 Actions check runs on every push.
 
 ```
 hks-morpheus-apps/
 ├── apps/
-│   ├── hpe-enterprise/hpe-enterprise.yaml   ← Morpheus spec: ConfigMap + Deployment + Service (NodePort 30081)
-│   └── hello-world/hello-world.yaml         ← Morpheus spec: ConfigMap + Deployment + Service (NodePort 30082)
-├── cluster/namespace.yaml                   namespace hpe-apps, Pod Security restricted (kubectl route)
-├── kustomization.yaml                       kubectl apply -k .  (CI, break-glass, no-Morpheus route)
+│   ├── hpe-enterprise/hpe-enterprise.yaml   ConfigMap + Deployment + Service (NodePort 30081)
+│   └── hello-world/hello-world.yaml         ConfigMap + Deployment + Service (NodePort 30082)
+├── morpheus/task-script.sh                  ← paste into the Morpheus task (ACTION / APP / REF at the top)
 ├── scripts/
+│   ├── morpheus-deploy.sh                   apply | status | delete with kubectl (what the task runs)
 │   ├── smoke-test.sh                        test both apps on every node's NodePort
 │   ├── validate.sh                          all offline checks (also what CI runs)
-│   ├── check_specs.py                       Morpheus-specific spec rules
+│   ├── check_specs.py                       spec rules
 │   └── test-pages.sh                        serve each page with real nginx in Docker and check it
+├── cluster/namespace.yaml                   namespace hpe-apps, Pod Security restricted (kubectl route)
+├── kustomization.yaml                       kubectl apply -k .  (CI, break-glass)
 ├── .github/workflows/validate.yml
 ├── README.md
 └── PLAYBOOK.md                              this playbook
 ```
 
-Four rules keep a spec deployable by Morpheus. The CI check enforces all of them:
+Four rules keep a spec deployable by both routes. The CI check enforces all of them:
 
 1. One self-contained file per app, named after its folder.
-2. No `metadata.namespace`: the namespace is picked when the App is deployed.
-3. No dollar signs and no Morpheus template tags anywhere in the file, comments included. Morpheus can run specs
-   through its variable templating.
+2. No `metadata.namespace`: the task (or the Morpheus App wizard) picks the namespace.
+3. No dollar signs, no Morpheus template tags and no `---` except as document separators. Morpheus can run
+   specs through its variable templating.
 4. When the page changes, bump `app_version` in `index.html` and the `hks-morpheus-apps/version` pod annotation to
    the same value.
 
-To work with the code on vmemgr or the master (the nodes already have the proxy in `/etc/environment`):
+## Phase 2 — Deploy with a Morpheus task
+
+One Shell Script task does the whole deploy on the master and reports an honest result: it fails if a
+rollout or the page check fails, and its output shows every step.
+
+1. **Create the task.** **Library → Automation → Tasks → + ADD**:
+
+| Field | Value |
+| --- | --- |
+| NAME | `HKS apps - deploy` |
+| TYPE | Shell Script |
+| SOURCE | Local |
+| CONTENT | the contents of `morpheus/task-script.sh` (below) |
+| EXECUTE TARGET | Remote |
+| Remote host / PORT | the master's IP (`hpe-ns-17`) / 22 |
+| USERNAME, PASSWORD or KEY | the SSH user and password or key pair from the cluster wizard |
 
 ```bash
-export https_proxy=http://192.168.200.250:888     # vmemgr only, if not already set
-git clone https://github.com/sahilanand07/hks-morpheus-apps.git
-cd hks-morpheus-apps
-bash scripts/validate.sh                          # optional: needs python3-yaml; kubeconform and docker steps skip if missing
+ACTION=apply      # apply | status | delete
+APP=all           # all | hpe-enterprise | hello-world
+REF=main          # branch or tag to deploy
+
+set -a
+# shellcheck disable=SC1091
+[ -r /etc/environment ] && . /etc/environment
+set +a
+d=$(mktemp -d)
+git clone -q --depth 1 --branch "$REF" https://github.com/sahilanand07/hks-morpheus-apps.git "$d/repo" \
+  || { echo "git clone of '$REF' failed: check git, the proxy in /etc/environment and the ref"; rm -rf "$d"; exit 1; }
+rc=0
+REF="$REF" bash "$d/repo/scripts/morpheus-deploy.sh" "$ACTION" "$APP" || rc=$?
+rm -rf "$d"
+exit $rc
 ```
 
-## Phase 2 — Connect Morpheus to the repository
+2. **Wrap it in a workflow.** **Library → Automation → Workflows → + ADD → Operational Workflow**, NAME
+   `HKS apps - deploy`, add the task, save.
+3. **Run it.** Open the workflow and **Execute** it with no target (the task names its own host). If your task page
+   has its own Execute button, that works too. The output is in the execution history.
+4. **Optional: self-service tile.** **Library → Blueprints → Catalog Items → + ADD → Workflow**, pick the workflow.
+   Users order it from **Provisioning → Catalog**.
+5. **Status and teardown tasks.** Copy the task as `HKS apps - status` (`ACTION=status`) and
+   `HKS apps - delete` (`ACTION=delete`).
 
-One Git integration lets every blueprint read the repo; with caching off, each deploy fetches the latest commit.
+A good run ends like this (pod names differ):
 
-1. Go to **Administration → Integrations** and click **+ NEW INTEGRATION** (**+ ADD** on older screens). The same
-   form is under **Provisioning → Code → Integrations**.
-2. Choose **Git Repository** and fill in:
-
-| Field | Value | Note |
-| --- | --- | --- |
-| NAME | `hks-morpheus-apps` | |
-| ENABLED | ticked | |
-| GIT URL | `https://github.com/sahilanand07/hks-morpheus-apps.git` | |
-| DEFAULT BRANCH | `main` | Type it; don't rely on a master/main default. |
-| USERNAME / PASSWORD | empty | Public repo. For a private repo: GitHub user name, and a personal access token in PASSWORD. |
-| ACCESS TOKEN | empty | Unused; tokens go in PASSWORD. |
-| KEY PAIR | empty | Only for SSH URLs. |
-| ENABLE GIT REPOSITORY CACHING | unticked | Fresh fetch on every use. Ticked reuses a copy up to 5 minutes old. |
-
-3. Click **SAVE CHANGES**, then open the integration. It should list the repository and the `main` branch. An
-   error here is almost always the appliance proxy: see Troubleshooting.
-
-## Phase 3 — Create the namespace
-
-Create `hpe-apps` from Morpheus so the App wizard offers it, then turn on Pod Security `restricted` with one
-kubectl command.
-
-1. **Infrastructure → Clusters → k8s-1 → Namespaces** tab → **+ ADD**.
-2. NAME `hpe-apps`, leave it active, and save.
-3. On the master, enforce Pod Security (recommended; both apps were tested against it):
-
-```bash
-kubectl label ns hpe-apps pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted
+```
+hpe-enterprise: applying version 1.0.0 (commit 1d2cd3b) to namespace hpe-apps
+    configmap/hpe-enterprise-content created
+    deployment.apps/hpe-enterprise created
+    service/hpe-enterprise created
+  hpe-enterprise: rollout complete
+  hpe-enterprise: http://192.168.200.51:30081/ answered from pod hpe-enterprise-6c6cbdfd88-82gjh (version 1.0.0)
+OK   hpe-enterprise
+... the same for hello-world ...
+open on any node: 192.168.200.43 192.168.200.49 192.168.200.50 192.168.200.51  (hpe-enterprise :30081, hello-world :30082)
+RESULT: OK
 ```
 
-If you created the namespace with kubectl instead (`kubectl apply -f cluster/namespace.yaml`), run the cluster's
-**Actions → Refresh** so Morpheus picks it up. If it still doesn't appear in the wizard, create it in Morpheus as above.
+What `scripts/morpheus-deploy.sh` does on each run:
 
-## Phase 4 — Create the two App Blueprints
+- creates `hpe-apps` if it is missing and labels it Pod Security `restricted`;
+- runs `kubectl apply`, so it creates **or** updates, including objects an earlier blueprint deploy left behind;
+- waits up to 180 s per app (`WAIT`), then GETs the page through the NodePort and prints the pod and version;
+- on failure prints the pods and their events, and exits 1 so Morpheus marks the run failed;
+- reads the proxy from `/etc/environment` when the SSH session has none, and re-runs itself with `sudo -n` when the
+  SSH user cannot read `/etc/kubernetes/admin.conf`.
 
-Each app gets a Kubernetes App Blueprint whose config comes straight from its file in Git.
+Task and workflow field names follow the HPE Morpheus 8.x documentation; check the labels on your 9.1 screens.
 
-1. Go to **Library → Blueprints → App Blueprints** and click **+ ADD**.
-2. On the **Name** tab, enter the NAME from the table and set **Type** to **Kubernetes**. Click **NEXT**.
-3. In **Cluster Summary**, enter NAME, DESCRIPTION and CATEGORY `web`.
-4. In **Kubernetes Configuration**, set the Git fields from the table.
-5. Click **COMPLETE**. Repeat for the second app.
+## Phase 3 — Verify
 
-| Field | HPE Enterprise team page | Hello World |
-| --- | --- | --- |
-| NAME | `HPE Enterprise Page` | `Hello World` |
-| DESCRIPTION | HPE Enterprise team landing page, NodePort 30081 | Hello World demo, NodePort 30082 |
-| CONFIG TYPE | Git Repository | Git Repository |
-| SCM INTEGRATION | your Git integration from Phase 2 | same |
-| REPOSITORY | `hks-morpheus-apps` | `hks-morpheus-apps` |
-| BRANCH OR TAG | `main` (type it; empty means `master`) | `main` |
-| SPEC PATH | `apps/hpe-enterprise` | `apps/hello-world` |
-| CONFIG | `hpe-enterprise.yaml` | `hello-world.yaml` |
-
-Type `main` in BRANCH OR TAG. Left empty, Morpheus 9.1 looks for `master`, which this repo doesn't have, and CONFIG
-shows `Failed to load remote git config: undefined`. SPEC PATH (WORKING PATH in the 8.x docs) is the app's folder,
-with no `./` at the start and no slash at the end; CONFIG then lists the file. A tag such as `v1.0.0` instead of
-`main` pins a release (Phase 7).
-
-## Phase 5 — Deploy the Apps
-
-Deploy each blueprint once into `hpe-apps` on `k8s-1`; each App is Running within about 2 minutes.
-
-1. Go to **Provisioning → Apps** and click **+ ADD**.
-2. **Template:** select the blueprint `HPE Enterprise Page` and click **NEXT**.
-3. **Setup:** NAME `hpe-enterprise`; GROUP = a group that contains the cluster's cloud (`All Clouds` works);
-   **RESOURCE POOL** = `<cluster> / hpe-apps` (for example `k8sfinal / hpe-apps`): this one field picks both cluster
-   and namespace; ENVIRONMENT and LABELS optional. Click **NEXT**.
-4. **Configure:** leave the blueprint's item as it is and click **NEXT**. If it asks for a cluster or namespace
-   again, pick the same ones.
-5. **Review:** click **COMPLETE**.
-6. Watch the App's status turn **Running**; its **History** tab shows the apply.
-7. Repeat with blueprint `Hello World`, App NAME `hello-world`.
-
-The App NAME is only the Morpheus record: the Kubernetes objects keep the names in the YAML (`hpe-enterprise`,
-`hello-world`). Steps 1–3 match the 9.1 wizard (Template, Setup, Configure, Review) seen in the lab.
-
-Deploy each blueprint only once. The NodePorts are fixed, so a second copy, or the kubectl route on top of a
-Morpheus App, fails with `provided port is already allocated`.
-
-## Phase 6 — Verify
-
-The deploy is good when both Apps are Running in Morpheus, each Deployment shows 2/2 on different workers, and the
-smoke test ends `All apps answer on every node.`
-
-**In Morpheus:** both Apps show **Running**. **Infrastructure → Clusters → k8s-1** lists the two Deployments, four
-pods and two Services in `hpe-apps`.
+The deploy is good when the Morpheus run ends `RESULT: OK`, each Deployment shows 2/2 on different workers,
+and the smoke test ends `All apps answer on every node.`
 
 **With kubectl on the master:**
 
 ```bash
 export KUBECONFIG=/etc/kubernetes/admin.conf     # as root on the master; without it kubectl tries localhost:8080
 kubectl -n hpe-apps get deploy,pods,svc -o wide
-kubectl -n hpe-apps rollout status deploy/hpe-enterprise
-kubectl -n hpe-apps rollout status deploy/hello-world
 ```
 
 Expect `READY 2/2` for each Deployment, the pods spread over the workers, and Services `80:30081/TCP` and
-`80:30082/TCP`.
+`80:30082/TCP`. In the lab, Hello World came up as 2/2 on `hpe-ns-19` and `hpe-ns-20`.
 
-**Smoke test** from the repo clone on vmemgr or the master (it bypasses the proxy for node IPs):
+**Smoke test** from a clone of the repo on vmemgr or the master (it bypasses the proxy for node IPs):
 
 ```bash
-bash scripts/smoke-test.sh                       # lab nodes .43 .49 .50 .51
-bash scripts/smoke-test.sh 192.168.200.49        # or just some nodes
+bash scripts/smoke-test.sh 192.168.200.43 192.168.200.49 192.168.200.50 192.168.200.51
 ```
 
-Example of a passing run (pod names will differ):
+**In a browser:** open `http://<node-ip>:30081/` and `http://<node-ip>:30082/`. Refresh a few times: the pod name
+changes between the two replicas.
 
-```
-== hpe-enterprise  (NodePort 30081)
-  NODE              HEALTH  PAGE     POD                                      VERSION
-  192.168.200.43    200     200      hpe-enterprise-6c6cbdfd88-82gjh          1.0.0    PASS
-  192.168.200.49    200     200      hpe-enterprise-6c6cbdfd88-wck5m          1.0.0    PASS
-  ...
-  load balancing: 10 requests to 192.168.200.43 were served by 2 pod(s):
-    - hpe-enterprise-6c6cbdfd88-82gjh
-    - hpe-enterprise-6c6cbdfd88-wck5m
-...
-All apps answer on every node.
-```
+## Phase 4 — Update, roll out, roll back
 
-**In a browser:** open `http://192.168.200.49:30081/` and `http://192.168.200.49:30082/`. Refresh a few times: the
-pod name changes between the two replicas.
+You change Git, then run the deploy task again: `kubectl apply` replaces the pods one at a time, so the page stays up.
 
-## Phase 7 — Update, roll out, roll back
-
-A push alone changes nothing on the cluster: you change Git, then roll the new spec out, either with kubectl (no
-downtime) or by redeploying the Morpheus App (about a minute of downtime).
-
-**1. Change the app in Git.** Edit `apps/hello-world/hello-world.yaml` in the GitHub web editor or a clone. Change
-the page, then set the same new version in both places:
+1. **Change the app in Git.** Edit `apps/hello-world/hello-world.yaml` in the GitHub web editor or a clone. Change
+   the page, then set the same new version in both places:
 
 ```
 <!--# set var="app_version" value="1.1.0" -->      (in index.html)
 hks-morpheus-apps/version: "1.1.0"                 (pod template annotation)
 ```
 
-**2. Push and wait for the green check** on the `validate` workflow. It fails if the two versions differ or a rule
-from Phase 1 is broken.
-
-**3. Roll it out — choose one:**
-
-| Option | How | Downtime | Use when |
-| --- | --- | --- | --- |
-| A. Rolling update (recommended) | On the master, in the clone: `git pull`, then `kubectl -n hpe-apps apply -f apps/hello-world/hello-world.yaml` and `kubectl -n hpe-apps rollout status deploy/hello-world` | None: a new pod starts before an old one stops | Day-to-day changes, live demos |
-| B. Morpheus redeploy | **Provisioning → Apps → hello-world → DELETE**, check `kubectl -n hpe-apps get svc hello-world` is gone, then deploy the blueprint again (Phase 5) | About 1 minute | Showing the full Morpheus flow, or after renaming objects |
-
-**4. Confirm the new version is live** on every node:
-
-```bash
-EXPECT_VERSION=1.1.0 APPS="hello-world:30082" bash scripts/smoke-test.sh
-```
+2. **Push and wait for the green check** on the `validate` workflow. It fails if the two versions differ or a rule
+   from Phase 1 is broken.
+3. **Run `HKS apps - deploy` again** (or a copy with `APP=hello-world`). The output shows `configured` for the
+   changed objects, the rollout, and the new version answering.
+4. **Confirm on every node:** `EXPECT_VERSION=1.1.0 APPS="hello-world:30082" bash scripts/smoke-test.sh <node-ips>`
 
 **Roll back** with Git, not with `kubectl rollout undo`. The page lives in the ConfigMap, which `rollout undo`
 leaves untouched, so it would restart the pods and keep serving the new page. Instead: `git revert <commit>`,
-push, and roll out again with A or B.
+push, and run the deploy task again.
 
-**Pin releases** by tagging: `git tag v1.1.0 && git push --tags`, then set the blueprint's BRANCH OR TAG to the tag.
-A Morpheus redeploy then always gives that exact version.
+**Pin releases** by tagging: `git tag v1.1.0 && git push --tags`, then set `REF=v1.1.0` in the task. Every run of
+that task deploys exactly that version.
 
 ## Teardown
 
-Remove what Morpheus deployed through Morpheus, then confirm with kubectl that nothing is left behind.
+Run `HKS apps - delete` (`ACTION=delete`, `APP=all`). It removes the Deployment, Service and ConfigMap of each app
+by label and leaves the namespace. Check with `kubectl -n hpe-apps get all,cm` (only `kube-root-ca.crt` remains),
+then optionally `kubectl delete ns hpe-apps`.
 
-1. **Provisioning → Apps** → select `hpe-enterprise` → **DELETE**. If the dialog offers to remove the associated
-   resources, tick it. Repeat for `hello-world`.
-2. Check: `kubectl -n hpe-apps get all,cm` shows only `kube-root-ca.crt`. Delete any leftover by name, for example
-   `kubectl -n hpe-apps delete svc hello-world`.
-3. Optional: delete the namespace (cluster **Namespaces** tab, or `kubectl delete ns hpe-apps`). The blueprints and
-   the Git integration can stay for the next demo.
+Without Morpheus: `kubectl -n hpe-apps delete deploy,svc,cm -l app.kubernetes.io/part-of=hks-morpheus-apps`.
+Deleting a Morpheus **App** from the blueprint route does not remove anything (see *Alternative*).
 
-If you used the kubectl route instead, `kubectl delete -k .` from the repo root removes both apps and the namespace.
+## Alternative — Kubernetes App Blueprint (limited on 9.1)
+
+The blueprint route puts the apps on the cluster, but on Morpheus 9.1 Morpheus cannot map the objects back to the
+App: the App shows **Unknown**, a redeploy fails while the objects exist, and deleting the App leaves them running.
+Use it to show the blueprint catalog; use the task for anything you update.
+
+1. **Git integration.** **Administration → Integrations → + NEW INTEGRATION → Git Repository**: NAME
+   `hks-morpheus-apps`, GIT URL `https://github.com/sahilanand07/hks-morpheus-apps.git`, DEFAULT BRANCH `main`
+   (type it), USERNAME and PASSWORD empty for this public repo, ENABLE GIT REPOSITORY CACHING unticked.
+2. **Namespace in Morpheus.** **Infrastructure → Clusters → <cluster> → Namespaces → + ADD**, NAME `hpe-apps`.
+   The App wizard only offers namespaces Morpheus knows.
+3. **Spec Template per app.** **Library → Templates → Spec Templates → + ADD**: NAME `hello-world`, TYPE
+   **Kubernetes Spec**, SOURCE **Repository**, the integration and repo above, file path
+   `apps/hello-world/hello-world.yaml`, ref `main`. Repeat for `hpe-enterprise`.
+4. **Blueprint per app.** **Library → Blueprints → App Blueprints → + ADD**, Type **Kubernetes**, CONFIG TYPE
+   **Kubernetes Spec**, SPEC TEMPLATE `hello-world`, COMPLETE.
+5. **Deploy.** **Provisioning → Apps → + ADD** → the blueprint → **Setup**: NAME, GROUP (`All Clouds` works),
+   **RESOURCE POOL** `<cluster> / hpe-apps` (this one field picks cluster and namespace) → **Configure**: NEXT →
+   **Review**: COMPLETE.
+6. **Check with kubectl**, not the App status: `kubectl -n hpe-apps get deploy,pods,svc`.
+
+Do **not** use CONFIG TYPE **Git Repository** on 9.1: it reads the repo but applies nothing. Before deploying a
+blueprint again, remove its objects:
+`kubectl -n hpe-apps delete deploy,svc,cm -l app.kubernetes.io/name=hello-world`.
+
+Morpheus 9.1 issues found in the lab (worth an HPE ticket, with the appliance log):
+
+| Issue | Log signature | Effect |
+| --- | --- | --- |
+| CONFIG TYPE Git Repository applies nothing | `load spec files error: groovy.lang.MissingMethodException: ... appendSpecFiles() ... (ArrayList, [Ljava.io.File;)` at `KubernetesProvisionService.groovy:6844` | App "succeeds", status Unknown, no objects |
+| Objects not linked to the App | `KubernetesResourceMappingService - mapResult: null` | App status Unknown, empty Resources tab, App delete leaves the objects |
+| Create-only deploy | `409 ... already exists`, `422 ... nodePort ... provided port is already allocated` | Redeploy fails while the objects exist; no updates |
+| Wizard preview crash | `LinkedHashMap cannot be cast to class java.lang.CharSequence` at `KubernetesComputeUtility.groovy:168` | Preview only; the deploy itself continues |
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Git integration shows an error, or no repository or branch | Appliance can't reach github.com | Set **Administration → Settings → Proxy Settings** to `192.168.200.250:888`; test with the `curl -x` line from Prerequisites. |
-| Blueprint CONFIG shows `Failed to load remote git config: undefined` or lists nothing | BRANCH OR TAG left empty (Morpheus then asks for `master`), or SPEC PATH wrong | `apps/hpe-enterprise` or `apps/hello-world`, no `./` or trailing slash; type BRANCH OR TAG `main`. |
-| Morpheus reads `master` instead of `main` | Default branch not honoured | Set DEFAULT BRANCH `main` on the integration and BRANCH OR TAG `main` on the blueprint. |
-| `hpe-apps` missing from the App wizard | Namespace created with kubectl only | Create it in Morpheus (Phase 3), or run the cluster's **Actions → Refresh**. |
-| Deploy fails: `provided port is already allocated` | The app already runs (an earlier App, the kubectl route, or a leftover Service) | `kubectl get svc -A \| grep 3008`; delete the old App or the leftover Service, then deploy again. |
+| Task fails at once: SSH or authentication error | Wrong host, user, password or key in the task | Test `ssh <user>@<master-ip>` from vmemgr with the same credentials. |
+| Task output: `git clone of 'main' failed` | git missing, or the master can't reach GitHub | `git --version`; `bash hks.sh proxy` on vmemgr; check the ref exists. |
+| Task output: `cannot reach the Kubernetes API` | Not running on the master, or the API address is missing from `NO_PROXY` | Point the task at the master; keep the node subnet in `NO_PROXY` (`hks.env`). |
+| Task output: `admin.conf needs root and passwordless sudo is not available` | The SSH user has no passwordless sudo | Give it `NOPASSWD` sudo, or use root. |
+| Task output: `FAIL <app>: not ready after 180s` | Pods can't start; the task prints their status and events | Read the events: image pull (proxy), Pod Security, scheduling. |
+| Task output: `<app>: http://<ip>:<port>/ did not answer yet` | Pods ready but the NodePort not reachable from the master | `curl --noproxy '*' http://<ip>:<port>/healthz` on the master; check kube-proxy and Calico. |
+| `kubectl apply` warns `missing the kubectl.kubernetes.io/last-applied-configuration annotation` | The objects were first created by a Morpheus blueprint deploy | Harmless; kubectl adds it on that run. |
 | Pods `ErrImagePull` / `ImagePullBackOff` | containerd can't reach Docker Hub through the proxy | On vmemgr `bash hks.sh proxy`; on a worker test `sudo crictl pull docker.io/nginxinc/nginx-unprivileged:1.27-alpine`. |
 | Pods stuck `ContainerCreating`, event mentions Calico and `Gateway Timeout` | Pod and service ranges missing from containerd `NO_PROXY` | `bash hks.sh proxy`, then delete the Pending pods (hks-hybrid-kit Troubleshooting). |
 | ReplicaSet event `violates PodSecurity "restricted"` | The securityContext was edited away | Restore the spec from Git; the shipped specs pass `restricted`. |
-| Pods `Pending` | No room or a taint on the workers | `kubectl -n hpe-apps describe pod <pod>` and read Events. |
 | Page shows `unknown` or raw `<!--#` text | SSI switched off in `default.conf` | Keep `ssi on;` in the `location /` block (CI checks this). |
+| `kubectl` says `connection to the server localhost:8080 was refused` | No kubeconfig in that shell | `export KUBECONFIG=/etc/kubernetes/admin.conf` on the master. |
 | `curl` to a node IP hangs on vmemgr | The request went to the internet proxy | Use `curl --noproxy '*'`; `smoke-test.sh` already does. |
-| Page didn't change after a push | Nothing was rolled out yet | Phase 7 step 3. With repository caching ticked, Morpheus may also use a copy up to 5 minutes old. |
-| `kubectl apply` warns `missing the kubectl.kubernetes.io/last-applied-configuration annotation` | Morpheus created the objects without that annotation | Harmless the first time; kubectl adds it. |
+| Page didn't change after a push | Nothing was rolled out yet | Run the deploy task again (Phase 4). |
+| Blueprint App shows Unknown and nothing was deployed | CONFIG TYPE Git Repository (9.1 bug) | Use the task, or the Spec Template blueprint (*Alternative*). |
+| Blueprint redeploy: `already exists` / `provided port is already allocated` | Blueprint deploys only create | Use the task, or delete the objects first (*Alternative*). |
+| Blueprint CONFIG shows `Failed to load remote git config: undefined` | BRANCH OR TAG left empty (Morpheus then asks for `master`) | Type `main`. |
 
 ## Optional extras
 
-- **Self-service tile.** **Library → Blueprints → Catalog Items → + ADD**, type Blueprint, select an App Blueprint
-  and preset group, cloud, cluster and namespace. Users then order it from **Provisioning → Catalog**.
+- **One task with choices.** Add Morpheus Inputs (for example `hksAction`, `hksApp`) to the workflow or catalog
+  item and set `ACTION=<%=customOptions.hksAction%>` and `APP=<%=customOptions.hksApp%>` in the task instead of
+  fixed values.
 - **kubectl route (no Morpheus).** `kubectl apply -k .` from the repo root creates `hpe-apps` with Pod Security
-  `restricted` and both apps. Don't mix it with Morpheus Apps on the same cluster: the NodePorts clash.
-- **Spec Template route.** **Library → Templates → Spec Templates → + ADD**, TYPE Kubernetes Spec, SOURCE Repository,
-  pointing at the same file. A blueprint can then use CONFIG TYPE Kubernetes Spec, and the template can be reused
-  elsewhere in the Library.
+  `restricted` and both apps; `bash scripts/morpheus-deploy.sh apply all` on the master does the same with checks.
 - **Friendly URL on port 80.** `hks-on-hvm/nginx-proxy-setup.sh` fronts one app per run, for example
   `sudo NODEPORT=30081 APP_HOSTNAME=hpe.hpe.lab WORKER_IPS="192.168.200.49 192.168.200.50 192.168.200.51" bash nginx-proxy-setup.sh`.
-- **Morpheus API.** `POST /api/clusters/{id}/apply-template` takes `serviceUrl`, `specYaml` or `specTemplate` but no
-  namespace, so these namespace-less specs would land in the default namespace. Use the App route above instead.
+- **GitOps.** For deploy-on-push without anyone running a task, an Argo CD or Flux controller on the cluster can
+  watch this repo; Morpheus would then only install and observe it.
 
 ## Reference values
 
 | Item | Value |
 | --- | --- |
 | Morpheus appliance | `vmemgr.hpe.lab`, HPE Morpheus 9.1 |
-| Cluster | `k8s-1` (your name), cloud `HKS-HYBRID`, Kubernetes v1.35.10, Calico |
-| Nodes | master `192.168.200.43`; workers `.49`, `.50`, `.51` |
+| Cluster | `k8sfinal`, cloud `HKS-HYBRID`, Kubernetes v1.35.10, Calico; master `hpe-ns-17`, workers `hpe-ns-18`–`20` |
+| Nodes (kit) | `192.168.200.43`, `.49`, `.50`, `.51` (check with `kubectl get nodes -o wide`) |
 | Pod / service CIDR | `172.20.0.0/16` / `172.30.0.0/16` |
 | Internet proxy | `http://192.168.200.250:888` |
 | Namespace | `hpe-apps` |
@@ -320,22 +297,23 @@ If you used the kubectl route instead, `kubectl delete -k .` from the repo root 
 
 ## What was tested
 
-- **Spec rules:** `check_specs.py` passes both apps and catches seven deliberate faults (version mismatch, dollar
-  sign, template tag, namespace set, duplicate and reserved NodePort, `latest` tag).
+- **Lab (Morpheus 9.1, cluster k8sfinal):** the Spec Template blueprint deployed Hello World (2/2 on `hpe-ns-19`
+  and `hpe-ns-20`, NodePort 30082); CONFIG TYPE Git Repository applied nothing; a blueprint redeploy failed with
+  `already exists`. The task route has not had its first lab run yet.
+- **`morpheus-deploy.sh` and `morpheus/task-script.sh`** against a Kubernetes v1.35.0 API server: apply (namespace
+  created and labelled), re-apply over objects created without kubectl as Morpheus does, rollout timeout with
+  diagnostics, status, delete, bad input, a missing ref, standalone clone from GitHub as a non-root sudo user, and
+  proxy settings taken from an env file.
+- **Spec rules:** `check_specs.py` passes both apps and catches deliberate faults (version mismatch, dollar sign,
+  template tag, stray `---`, namespace set, duplicate and reserved NodePort, `latest` tag).
 - **Schemas:** kubeconform `-strict` against Kubernetes 1.35.0, raw files and kustomize output: 7 of 7 valid.
-- **Real API server:** applied to a Kubernetes v1.35.0 API server with controller manager. Pod Security
-  `restricted` admitted all four pods and rejected a non-compliant one. A version bump created a new ReplicaSet
-  (rolling update). A second copy failed with `provided port is already allocated`.
-- **Pages:** each served by the real image as user 101 with a read-only root filesystem. `/healthz` returns ok,
-  SSI fills pod, IP, time and version, `Cache-Control: no-store` is set, and the nginx version is hidden.
-  Rendered in Chrome on desktop and phone widths.
-- **Smoke test:** run against simulated nodes, including a dead node and a wrong version.
-- **Not yet run:** the Morpheus 9.1 screens themselves and the live HKS cluster. Phases 2–5 follow HPE Morpheus 8.x
-  documentation; the 9.1 blueprint form (SPEC PATH, branch default master) was checked against a lab screenshot.
+- **Pod Security:** on a v1.35.0 API server `restricted` admitted all four pods and rejected a non-compliant one.
+- **Pages:** each served by the real image as user 101 with a read-only root filesystem; SSI fills pod, IP, time and
+  version; rendered in Chrome on desktop and phone widths.
 
 ## Sources
 
+- [Tasks — HPE Morpheus Enterprise docs](https://docs.morpheusdata.com/en/latest/library/automation/tasks.html)
 - [Kubernetes Blueprints — HPE Morpheus Enterprise docs 8.0.6](https://docs.morpheusdata.com/en/8.0.6/library/blueprints/appBlueprints/kubernetes.html)
 - [Git integration — HPE Morpheus Enterprise docs 8.0.5](https://docs.morpheusdata.com/en/8.0.5/integration_guides/Deployments/Git.html)
 - [Spec Templates — HPE Morpheus Enterprise docs 8.0.6](https://docs.morpheusdata.com/en/8.0.6/library/templates/specTemplates.html)
-- [Apply Template to Cluster (Kubernetes) — Morpheus API reference](https://apidocs.morpheusdata.com/reference/applytemplate)

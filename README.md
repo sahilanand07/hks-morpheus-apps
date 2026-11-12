@@ -3,32 +3,33 @@
 Two demo web apps for the HKS (HPE Kubernetes Service) hybrid cluster, deployed from this repository by
 **HPE Morpheus 9.1** through a Git integration and Kubernetes App Blueprints.
 
-| App | Morpheus spec (SPEC PATH / CONFIG) | NodePort | Page |
+| App | Spec | NodePort | Page |
 | --- | --- | --- | --- |
-| HPE Enterprise team page | `apps/hpe-enterprise` / `hpe-enterprise.yaml` | 30081 | "This page is for the HPE Enterprise team." |
-| Hello World | `apps/hello-world` / `hello-world.yaml` | 30082 | "Hello, World!" |
+| HPE Enterprise team page | `apps/hpe-enterprise/hpe-enterprise.yaml` | 30081 | "This page is for the HPE Enterprise team." |
+| Hello World | `apps/hello-world/hello-world.yaml` | 30082 | "Hello, World!" |
 
 Each page shows the pod that served it, its IP, the time and the page version, so refreshing demonstrates load
 balancing across the 2 replicas. No image build or registry is needed: each app is
 `nginxinc/nginx-unprivileged:1.27-alpine` with its page and nginx config in a ConfigMap. Pods run non-root with a
 read-only root filesystem and pass Pod Security `restricted`.
 
-**Full step-by-step procedure: [PLAYBOOK.md](PLAYBOOK.md)** (Git integration → namespace → blueprints → deploy →
-verify → update/rollback → teardown → troubleshooting).
+**Full step-by-step procedure: [PLAYBOOK.md](PLAYBOOK.md)** (Morpheus task → verify → update/rollback → teardown,
+the blueprint alternative and its 9.1 limits, troubleshooting).
 
 ## Quick start
 
-**Morpheus route (the demo):**
+**Morpheus route (recommended on Morpheus 9.1): a Shell Script task**
 
-1. *Administration → Integrations → + New Integration → Git Repository*: GIT URL
-   `https://github.com/sahilanand07/hks-morpheus-apps.git`, DEFAULT BRANCH `main`, caching off.
-2. Create namespace `hpe-apps` on the cluster (*Infrastructure → Clusters → k8s-1 → Namespaces*).
-3. *Library → Blueprints → App Blueprints → + Add*, type Kubernetes, CONFIG TYPE *Git Repository*,
-   BRANCH OR TAG `main` (type it: empty means `master`, and CONFIG then fails with
-   "Failed to load remote git config: undefined"), SPEC PATH and CONFIG from the table above. One blueprint per app.
-4. *Provisioning → Apps → + Add*, pick the blueprint; on *Setup*, RESOURCE POOL = `<cluster> / hpe-apps`
-   (cluster and namespace in one field); *Next*, *Next*, *Complete*.
-5. `bash scripts/smoke-test.sh` → `All apps answer on every node.`
+1. *Library → Automation → Tasks → + Add*: type Shell Script, source Local, content = `morpheus/task-script.sh`,
+   execute target Remote = the HKS master over SSH (root, or a user with passwordless sudo).
+2. *Library → Automation → Workflows → + Add → Operational Workflow* with that task; Execute it.
+   Optional: a *Workflow* catalog item for self-service.
+3. The run clones this repo on the master, runs `scripts/morpheus-deploy.sh apply all` (kubectl apply, rollout
+   wait, page check through the NodePort) and ends with `RESULT: OK`. Run it again after every push to roll out.
+
+The Kubernetes App Blueprint route also deploys the apps, but on 9.1 Morpheus loses track of them (App status
+Unknown, create-only, delete leaves the objects) and CONFIG TYPE *Git Repository* applies nothing. Details and the
+log signatures for an HPE ticket are in [PLAYBOOK.md](PLAYBOOK.md) → *Alternative*.
 
 **kubectl route (no Morpheus, CI, break-glass):**
 
@@ -47,6 +48,8 @@ apps/hpe-enterprise/hpe-enterprise.yaml   Morpheus spec: ConfigMap + Deployment 
 apps/hello-world/hello-world.yaml         Morpheus spec: ConfigMap + Deployment + Service
 cluster/namespace.yaml                    namespace hpe-apps, Pod Security restricted
 kustomization.yaml                        kubectl apply -k .
+morpheus/task-script.sh                   Morpheus Shell Script task body (ACTION / APP / REF at the top)
+scripts/morpheus-deploy.sh                apply | status | delete with kubectl (what the task runs)
 scripts/smoke-test.sh                     test both apps on every node (no kubectl needed)
 scripts/validate.sh                       offline checks: spec rules, kubeconform, nginx + page render
 scripts/check_specs.py                    Morpheus-specific spec rules (used by validate.sh)
@@ -60,7 +63,8 @@ scripts/test-pages.sh                     run each page in Docker like the pod d
 2. Bump `app_version` in the page (`<!--# set var="app_version" value="1.1.0" -->`) **and** the
    `hks-morpheus-apps/version` pod annotation to the same value.
 3. Push; the *validate* workflow must pass.
-4. Roll out: `kubectl -n hpe-apps apply -f apps/<app>/<app>.yaml` (no downtime), or redeploy the Morpheus App.
+4. Roll out: run the Morpheus deploy task again (rolling update, no downtime), or
+   `bash scripts/morpheus-deploy.sh apply <app>` on the master.
 5. `EXPECT_VERSION=1.1.0 bash scripts/smoke-test.sh`
 
 Rules the CI enforces, because Morpheus applies these files as they are: one self-contained file per app named after
