@@ -6,7 +6,7 @@
 #   Service     hpe-enterprise           NodePort 30081
 #
 # HPE Morpheus: Library > Blueprints > App Blueprints > Type Kubernetes >
-#   CONFIG TYPE "Git Repository", WORKING PATH apps/hpe-enterprise,
+#   CONFIG TYPE "Git Repository", BRANCH OR TAG main, SPEC PATH apps/hpe-enterprise,
 #   CONFIG hpe-enterprise.yaml. The namespace is chosen when you deploy the App,
 #   so no object here sets metadata.namespace.
 #

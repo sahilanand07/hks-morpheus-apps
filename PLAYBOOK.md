@@ -10,7 +10,7 @@ Two web apps live in GitHub and HPE Morpheus 9.1 deploys them, as Kubernetes App
 cluster (1 master, 3 workers, Kubernetes v1.35.10). Allow 30–45 minutes the first time and about
 5 minutes per app after that.
 
-| App | Spec in Git (Morpheus WORKING PATH / CONFIG) | Kubernetes objects | Replicas | Open it at |
+| App | Spec in Git (Morpheus SPEC PATH / CONFIG) | Kubernetes objects | Replicas | Open it at |
 | --- | --- | --- | --- | --- |
 | HPE Enterprise team page | `apps/hpe-enterprise` / `hpe-enterprise.yaml` | ConfigMap `hpe-enterprise-content`, Deployment and Service `hpe-enterprise` | 2 | `http://<any-node-ip>:30081/` |
 | Hello World | `apps/hello-world` / `hello-world.yaml` | ConfigMap `hello-world-content`, Deployment and Service `hello-world` | 2 | `http://<any-node-ip>:30082/` |
@@ -146,14 +146,16 @@ Each app gets a Kubernetes App Blueprint whose config comes straight from its fi
 | NAME | `HPE Enterprise Page` | `Hello World` |
 | DESCRIPTION | HPE Enterprise team landing page, NodePort 30081 | Hello World demo, NodePort 30082 |
 | CONFIG TYPE | Git Repository | Git Repository |
-| SCM INTEGRATION | `hks-morpheus-apps` | `hks-morpheus-apps` |
+| SCM INTEGRATION | your Git integration from Phase 2 | same |
 | REPOSITORY | `hks-morpheus-apps` | `hks-morpheus-apps` |
-| BRANCH OR TAG | `main` | `main` |
-| WORKING PATH | `apps/hpe-enterprise` | `apps/hello-world` |
+| BRANCH OR TAG | `main` (type it; empty means `master`) | `main` |
+| SPEC PATH | `apps/hpe-enterprise` | `apps/hello-world` |
 | CONFIG | `hpe-enterprise.yaml` | `hello-world.yaml` |
 
-WORKING PATH has no leading or trailing slash. `main` deploys the latest commit; a tag such as `v1.0.0` pins a
-release (Phase 7).
+Type `main` in BRANCH OR TAG. Left empty, Morpheus 9.1 looks for `master`, which this repo doesn't have, and CONFIG
+shows `Failed to load remote git config: undefined`. SPEC PATH (WORKING PATH in the 8.x docs) is the app's folder,
+with no `./` at the start and no slash at the end; CONFIG then lists the file. A tag such as `v1.0.0` instead of
+`main` pins a release (Phase 7).
 
 ## Phase 5 — Deploy the Apps
 
@@ -273,7 +275,7 @@ If you used the kubectl route instead, `kubectl delete -k .` from the repo root 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Git integration shows an error, or no repository or branch | Appliance can't reach github.com | Set **Administration → Settings → Proxy Settings** to `192.168.200.250:888`; test with the `curl -x` line from Prerequisites. |
-| Blueprint CONFIG list is empty | WORKING PATH or branch wrong | `apps/hpe-enterprise` or `apps/hello-world`, no slashes at either end; branch `main`. |
+| Blueprint CONFIG shows `Failed to load remote git config: undefined` or lists nothing | BRANCH OR TAG left empty (Morpheus then asks for `master`), or SPEC PATH wrong | `apps/hpe-enterprise` or `apps/hello-world`, no `./` or trailing slash; type BRANCH OR TAG `main`. |
 | Morpheus reads `master` instead of `main` | Default branch not honoured | Set DEFAULT BRANCH `main` on the integration and BRANCH OR TAG `main` on the blueprint. |
 | `hpe-apps` missing from the App wizard | Namespace created with kubectl only | Create it in Morpheus (Phase 3), or run the cluster's **Actions → Refresh**. |
 | Deploy fails: `provided port is already allocated` | The app already runs (an earlier App, the kubectl route, or a leftover Service) | `kubectl get svc -A \| grep 3008`; delete the old App or the leftover Service, then deploy again. |
@@ -327,7 +329,7 @@ If you used the kubectl route instead, `kubectl delete -k .` from the repo root 
   Rendered in Chrome on desktop and phone widths.
 - **Smoke test:** run against simulated nodes, including a dead node and a wrong version.
 - **Not yet run:** the Morpheus 9.1 screens themselves and the live HKS cluster. Phases 2–5 follow HPE Morpheus 8.x
-  documentation.
+  documentation; the 9.1 blueprint form (SPEC PATH, branch default master) was checked against a lab screenshot.
 
 ## Sources
 

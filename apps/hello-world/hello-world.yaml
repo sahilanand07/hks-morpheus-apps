@@ -6,7 +6,7 @@
 #   Service     hello-world           NodePort 30082
 #
 # HPE Morpheus: Library > Blueprints > App Blueprints > Type Kubernetes >
-#   CONFIG TYPE "Git Repository", WORKING PATH apps/hello-world,
+#   CONFIG TYPE "Git Repository", BRANCH OR TAG main, SPEC PATH apps/hello-world,
 #   CONFIG hello-world.yaml. The namespace is chosen when you deploy the App,
 #   so no object here sets metadata.namespace.
 #

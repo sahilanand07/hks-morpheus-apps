@@ -3,7 +3,7 @@
 Two demo web apps for the HKS (HPE Kubernetes Service) hybrid cluster, deployed from this repository by
 **HPE Morpheus 9.1** through a Git integration and Kubernetes App Blueprints.
 
-| App | Morpheus spec (WORKING PATH / CONFIG) | NodePort | Page |
+| App | Morpheus spec (SPEC PATH / CONFIG) | NodePort | Page |
 | --- | --- | --- | --- |
 | HPE Enterprise team page | `apps/hpe-enterprise` / `hpe-enterprise.yaml` | 30081 | "This page is for the HPE Enterprise team." |
 | Hello World | `apps/hello-world` / `hello-world.yaml` | 30082 | "Hello, World!" |
@@ -23,8 +23,9 @@ verify → update/rollback → teardown → troubleshooting).
 1. *Administration → Integrations → + New Integration → Git Repository*: GIT URL
    `https://github.com/sahilanand07/hks-morpheus-apps.git`, DEFAULT BRANCH `main`, caching off.
 2. Create namespace `hpe-apps` on the cluster (*Infrastructure → Clusters → k8s-1 → Namespaces*).
-3. *Library → Blueprints → App Blueprints → + Add*, type Kubernetes, CONFIG TYPE *Git Repository*, WORKING PATH and
-   CONFIG from the table above. One blueprint per app.
+3. *Library → Blueprints → App Blueprints → + Add*, type Kubernetes, CONFIG TYPE *Git Repository*,
+   BRANCH OR TAG `main` (type it: empty means `master`, and CONFIG then fails with
+   "Failed to load remote git config: undefined"), SPEC PATH and CONFIG from the table above. One blueprint per app.
 4. *Provisioning → Apps → + Add*, pick the blueprint, cloud `HKS-HYBRID`, cluster `k8s-1`, namespace `hpe-apps`.
 5. `bash scripts/smoke-test.sh` → `All apps answer on every node.`
 

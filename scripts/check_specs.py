@@ -2,7 +2,7 @@
 """Static checks for the Morpheus Kubernetes specs in apps/<app>/<app>.yaml.
 
 Checks that matter for the Morpheus route (and that kubeconform cannot see):
-  * one file per app, named after its folder (WORKING PATH / CONFIG in the blueprint)
+  * one file per app, named after its folder (SPEC PATH / CONFIG in the blueprint)
   * exactly one ConfigMap, Deployment and Service; nothing sets metadata.namespace
     (the namespace is picked in the Morpheus App wizard)
   * no dollar signs and no Morpheus template tags in the file
@@ -47,7 +47,7 @@ def check_app(path, nodeports, extract_dir):
     text = path.read_text(encoding="utf-8")
 
     if path.stem == app:
-        ok(f"file name matches folder (Morpheus WORKING PATH apps/{app}, CONFIG {path.name})")
+        ok(f"file name matches folder (Morpheus SPEC PATH apps/{app}, CONFIG {path.name})")
     else:
         fail(f"{path.name}: name it {app}.yaml so the blueprint settings in the playbook apply")
 
