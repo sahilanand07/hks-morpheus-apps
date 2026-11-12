@@ -1,0 +1,11 @@
+# kubectl route (CI, break-glass, or a cluster without Morpheus):
+#   kubectl apply -k .        deploy both apps into namespace hpe-apps
+#   kubectl delete -k .       remove them again (and the namespace)
+# HPE Morpheus does not read this file; it uses apps/<app>/<app>.yaml directly.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: hpe-apps
+resources:
+  - cluster/namespace.yaml
+  - apps/hpe-enterprise/hpe-enterprise.yaml
+  - apps/hello-world/hello-world.yaml

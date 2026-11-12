@@ -1,0 +1,12 @@
+# Namespace for both apps, with Pod Security "restricted" enforced.
+# Morpheus route: create the namespace in Morpheus instead (cluster > Namespaces),
+# then optionally add the labels with:
+#   kubectl label ns hpe-apps pod-security.kubernetes.io/enforce=restricted
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hpe-apps
+  labels:
+    app.kubernetes.io/part-of: hks-morpheus-apps
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
