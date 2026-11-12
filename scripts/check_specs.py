@@ -6,6 +6,7 @@ Checks that matter for the Morpheus route (and that kubeconform cannot see):
   * exactly one ConfigMap, Deployment and Service; nothing sets metadata.namespace
     (the namespace is picked in the Morpheus App wizard)
   * no dollar signs and no Morpheus template tags in the file
+  * '---' only as a document separator line
   * app_version in index.html == hks-morpheus-apps/version pod annotation
   * selectors, ConfigMap references and NodePorts are consistent; NodePorts are
     unique and avoid 30080 (used by the hks-hybrid-kit validation app)
@@ -59,6 +60,12 @@ def check_app(path, nodeports, extract_dir):
         fail(f"Morpheus template tag on line {line}")
     else:
         ok("no dollar signs or Morpheus template tags")
+
+    stray = [i for i, line in enumerate(text.splitlines(), 1) if "---" in line and line.strip() != "---"]
+    if stray:
+        fail(f"'---' outside a document separator on line(s) {stray}: a naive split on '---' would cut the file there")
+    else:
+        ok("'---' appears only as document separators")
 
     try:
         docs = [d for d in yaml.safe_load_all(text) if d]

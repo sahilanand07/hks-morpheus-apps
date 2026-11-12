@@ -1,4 +1,4 @@
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # HPE Enterprise team page - Morpheus Kubernetes spec (one self-contained file)
 #
 #   ConfigMap   hpe-enterprise-content   nginx server block + the page (index.html)
@@ -17,7 +17,7 @@
 # hks-morpheus-apps/version annotation below (CI checks they match), push.
 # No dollar signs and no Morpheus template tags anywhere in this file (not even in
 # comments): Morpheus can run specs through its variable templating.
-# ------------------------------------------------------------------------------
+# ==============================================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
