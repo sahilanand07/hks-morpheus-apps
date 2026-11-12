@@ -189,6 +189,7 @@ pods and two Services in `hpe-apps`.
 **With kubectl on the master:**
 
 ```bash
+export KUBECONFIG=/etc/kubernetes/admin.conf     # as root on the master; without it kubectl tries localhost:8080
 kubectl -n hpe-apps get deploy,pods,svc -o wide
 kubectl -n hpe-apps rollout status deploy/hpe-enterprise
 kubectl -n hpe-apps rollout status deploy/hello-world
