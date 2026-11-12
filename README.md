@@ -1,7 +1,8 @@
 # hks-morpheus-apps
 
 Two demo web apps for the HKS (HPE Kubernetes Service) hybrid cluster, deployed from this repository by
-**HPE Morpheus 9.1** through a Git integration and Kubernetes App Blueprints.
+**HPE Morpheus 9.1**: a Morpheus Shell Script task runs `scripts/morpheus-deploy.sh` on the master over SSH
+(recommended), or a Kubernetes App Blueprint applies the specs (works, with 9.1 limits).
 
 | App | Spec | NodePort | Page |
 | --- | --- | --- | --- |
