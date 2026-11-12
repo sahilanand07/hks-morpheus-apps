@@ -162,17 +162,18 @@ with no `./` at the start and no slash at the end; CONFIG then lists the file. A
 Deploy each blueprint once into `hpe-apps` on `k8s-1`; each App is Running within about 2 minutes.
 
 1. Go to **Provisioning → Apps** and click **+ ADD**.
-2. Select the blueprint `HPE Enterprise Page` and click **NEXT**.
-3. Setup: NAME `hpe-enterprise`, GROUP = the group that holds `HKS-HYBRID`, DEFAULT CLOUD `HKS-HYBRID`,
-   ENVIRONMENT optional. Click **NEXT**.
-4. Configure: select the Kubernetes item in the structure on the left. Pick the cluster `k8s-1` and the namespace
-   `hpe-apps`. Click **NEXT**.
-5. Review and click **COMPLETE**.
+2. **Template:** select the blueprint `HPE Enterprise Page` and click **NEXT**.
+3. **Setup:** NAME `hpe-enterprise`; GROUP = a group that contains the cluster's cloud (`All Clouds` works);
+   **RESOURCE POOL** = `<cluster> / hpe-apps` (for example `k8sfinal / hpe-apps`): this one field picks both cluster
+   and namespace; ENVIRONMENT and LABELS optional. Click **NEXT**.
+4. **Configure:** leave the blueprint's item as it is and click **NEXT**. If it asks for a cluster or namespace
+   again, pick the same ones.
+5. **Review:** click **COMPLETE**.
 6. Watch the App's status turn **Running**; its **History** tab shows the apply.
 7. Repeat with blueprint `Hello World`, App NAME `hello-world`.
 
-Screen labels in 9.1 can differ a little from the 8.x documentation (for example, the cluster may show as a cluster
-or resource-pool field); the values above are what matter.
+The App NAME is only the Morpheus record: the Kubernetes objects keep the names in the YAML (`hpe-enterprise`,
+`hello-world`). Steps 1–3 match the 9.1 wizard (Template, Setup, Configure, Review) seen in the lab.
 
 Deploy each blueprint only once. The NodePorts are fixed, so a second copy, or the kubectl route on top of a
 Morpheus App, fails with `provided port is already allocated`.

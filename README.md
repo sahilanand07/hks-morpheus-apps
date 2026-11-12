@@ -26,7 +26,8 @@ verify → update/rollback → teardown → troubleshooting).
 3. *Library → Blueprints → App Blueprints → + Add*, type Kubernetes, CONFIG TYPE *Git Repository*,
    BRANCH OR TAG `main` (type it: empty means `master`, and CONFIG then fails with
    "Failed to load remote git config: undefined"), SPEC PATH and CONFIG from the table above. One blueprint per app.
-4. *Provisioning → Apps → + Add*, pick the blueprint, cloud `HKS-HYBRID`, cluster `k8s-1`, namespace `hpe-apps`.
+4. *Provisioning → Apps → + Add*, pick the blueprint; on *Setup*, RESOURCE POOL = `<cluster> / hpe-apps`
+   (cluster and namespace in one field); *Next*, *Next*, *Complete*.
 5. `bash scripts/smoke-test.sh` → `All apps answer on every node.`
 
 **kubectl route (no Morpheus, CI, break-glass):**
