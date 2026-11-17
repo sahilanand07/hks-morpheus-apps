@@ -17,7 +17,7 @@
 # ------------------------------------------------------------------------------
 set -uo pipefail
 
-APPS="${APPS:-hpe-enterprise:30081 hello-world:30082}"
+APPS="${APPS:-hpe-enterprise:30081 hello-world:30082 doc-assistant:30083}"
 REQUESTS="${REQUESTS:-10}"
 EXPECT_VERSION="${EXPECT_VERSION:-}"
 if (( $# )); then NODES="$*"; else NODES="${NODES:-192.168.200.43 192.168.200.49 192.168.200.50 192.168.200.51}"; fi

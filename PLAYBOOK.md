@@ -1,12 +1,13 @@
 # HKS App Deployment Playbook — HPE Morpheus + Git
 
-Deploy the **HPE Enterprise team page** and **Hello World** from this repository to the HKS hybrid
-cluster with HPE Morpheus 9.1. Shared, editable copy of this playbook (with the flow diagram):
+Deploy the **HPE Enterprise team page**, **Hello World** and the **Private AI Assistant** (a small language
+model answering questions about documents, on CPUs) from this repository to the HKS hybrid cluster with HPE
+Morpheus 9.1. Shared, editable copy of this playbook (with the flow diagram):
 https://claude.ai/artifact/Kyq5vqXcd4mLdaR2SDZo3t
 
 ## Overview
 
-Morpheus deploys both apps by running one Shell Script task on the HKS master over SSH: the task clones
+Morpheus deploys the apps by running one Shell Script task on the HKS master over SSH: the task clones
 this repository and applies the specs with kubectl. On Morpheus 9.1 this is the reliable route. The
 Kubernetes App Blueprint route also gets the apps onto the cluster, but Morpheus loses track of them
 (see *Alternative*). Allow 30 minutes the first time and about 2 minutes per deploy after that.
@@ -15,12 +16,14 @@ Kubernetes App Blueprint route also gets the apps onto the cluster, but Morpheus
 | --- | --- | --- | --- | --- |
 | HPE Enterprise team page | `apps/hpe-enterprise/hpe-enterprise.yaml` | ConfigMap `hpe-enterprise-content`, Deployment and Service `hpe-enterprise` | 2 | `http://<any-node-ip>:30081/` |
 | Hello World | `apps/hello-world/hello-world.yaml` | ConfigMap `hello-world-content`, Deployment and Service `hello-world` | 2 | `http://<any-node-ip>:30082/` |
+| Private AI Assistant | `apps/doc-assistant/doc-assistant.yaml` | ConfigMap `doc-assistant-config`; Deployments and Services `doc-assistant` (web) and `doc-assistant-slm` (model server, ClusterIP) | 1 + 1 | `http://<any-node-ip>:30083/` |
 
 - **Repository:** https://github.com/sahilanand07/hks-morpheus-apps, branch `main`.
-- **No image build:** each app is the stock `nginxinc/nginx-unprivileged:1.27-alpine` image with its page and
-  nginx config in a ConfigMap. The cluster already pulled this image through the proxy during the kit's validation.
+- **Images:** the two pages need no image build: each is the stock `nginxinc/nginx-unprivileged:1.27-alpine` image
+  with its page and nginx config in a ConfigMap. The Private AI Assistant runs two images that GitHub Actions builds
+  from `images/` and pushes to `ghcr.io/sahilanand07` (see *Private AI Assistant*).
 - **Namespace:** `hpe-apps`, created by the task with Pod Security `restricted`. The specs set no namespace themselves.
-- **Security:** pods run as user 101 with a read-only root filesystem and all capabilities dropped.
+- **Security:** pods run as non-root users with a read-only root filesystem and all capabilities dropped.
 - **Each page shows** the pod that served it, the pod IP, the time and the page version. Refreshing shows the
   Service spreading requests across both pods.
 - **NodePort 30080** stays with the hks-hybrid-kit validation app in namespace `hello`.
@@ -32,6 +35,7 @@ Kubernetes App Blueprint route also gets the apps onto the cluster, but Morpheus
                                                                       kubectl apply ──► namespace hpe-apps
                                                                                          hpe-enterprise :30081
                                                                                          hello-world    :30082
+                                                                                         doc-assistant  :30083
 ```
 
 The work runs in four phases: code in GitHub, deploy with a Morpheus task, verify, then update.
@@ -49,6 +53,10 @@ Tick each item before Phase 2.
 - [ ] **Workers can pull the image.** On a worker: `sudo crictl images | grep nginx-unprivileged` lists
   `1.27-alpine`. If not, `sudo crictl pull docker.io/nginxinc/nginx-unprivileged:1.27-alpine` must succeed.
 - [ ] **kubectl on the master** for checks: `sudo -i`, then `export KUBECONFIG=/etc/kubernetes/admin.conf`.
+- [ ] **For the Private AI Assistant:** a worker with 4 CPU and 6 GiB of memory free (the model server's request;
+  it uses more CPU when free), and nodes that pull from GitHub's registry through the proxy. On a worker:
+  `sudo crictl pull ghcr.io/sahilanand07/hks-doc-assistant:1.0.0` must succeed. Image layers come from
+  `pkg-containers.githubusercontent.com`, so the proxy must allow it as well as `ghcr.io`.
 - [ ] **Morpheus rights.** Your role can manage Library Automation (Tasks, Workflows) and, for self-service,
   Catalog Items. The master-tenant admin can.
 
@@ -61,8 +69,13 @@ Actions check runs on every push.
 hks-morpheus-apps/
 ├── apps/
 │   ├── hpe-enterprise/hpe-enterprise.yaml   ConfigMap + Deployment + Service (NodePort 30081)
-│   └── hello-world/hello-world.yaml         ConfigMap + Deployment + Service (NodePort 30082)
+│   ├── hello-world/hello-world.yaml         ConfigMap + Deployment + Service (NodePort 30082)
+│   └── doc-assistant/doc-assistant.yaml     Private AI Assistant: web app + model server (NodePort 30083)
+├── images/
+│   ├── doc-assistant/                       web app (FastAPI): Dockerfile, app/, tests/, knowledge/, VERSION
+│   └── slm/                                 model server: Ollama (CPU) + Granite models built in, VERSION
 ├── morpheus/task-script.sh                  ← paste into the Morpheus task (ACTION / APP / REF at the top)
+├── morpheus/catalog-task-script.sh          the same for a self-service catalog item with an order form
 ├── scripts/
 │   ├── morpheus-deploy.sh                   apply | status | delete with kubectl (what the task runs)
 │   ├── smoke-test.sh                        test both apps on every node's NodePort
@@ -71,7 +84,8 @@ hks-morpheus-apps/
 │   └── test-pages.sh                        serve each page with real nginx in Docker and check it
 ├── cluster/namespace.yaml                   namespace hpe-apps, Pod Security restricted (kubectl route)
 ├── kustomization.yaml                       kubectl apply -k .  (CI, break-glass)
-├── .github/workflows/validate.yml
+├── .github/workflows/validate.yml           checks on every push
+├── .github/workflows/image-*.yml            build and push the two images to ghcr.io
 ├── README.md
 └── PLAYBOOK.md                              this playbook
 ```
@@ -83,7 +97,7 @@ Four rules keep a spec deployable by both routes. The CI check enforces all of t
 3. No dollar signs, no Morpheus template tags and no `---` except as document separators. Morpheus can run
    specs through its variable templating.
 4. When the page changes, bump `app_version` in `index.html` and the `hks-morpheus-apps/version` pod annotation to
-   the same value.
+   the same value. For an image built here, the image tag, `images/<name>/VERSION` and the pod annotation match.
 
 ## Phase 2 — Deploy with a Morpheus task
 
@@ -104,7 +118,7 @@ rollout or the page check fails, and its output shows every step.
 
 ```bash
 ACTION=apply      # apply | status | delete
-APP=all           # all | hpe-enterprise | hello-world
+APP=all           # all | hpe-enterprise | hello-world | doc-assistant
 REF=main          # branch or tag to deploy
 
 set -a
@@ -125,7 +139,8 @@ exit $rc
 3. **Run it.** Open the workflow and **Execute** it with no target (the task names its own host). If your task page
    has its own Execute button, that works too. The output is in the execution history.
 4. **Optional: self-service tile.** **Library → Blueprints → Catalog Items → + ADD → Workflow**, pick the workflow.
-   Users order it from **Provisioning → Catalog**.
+   Users order it from **Provisioning → Catalog**. For one tile with an order form (app, action, ref) see
+   *Self-service catalog*.
 5. **Status and teardown tasks.** Copy the task as `HKS apps - status` (`ACTION=status`) and
    `HKS apps - delete` (`ACTION=delete`).
 
@@ -147,8 +162,10 @@ RESULT: OK
 What `scripts/morpheus-deploy.sh` does on each run:
 
 - creates `hpe-apps` if it is missing and labels it Pod Security `restricted`;
-- runs `kubectl apply`, so it creates **or** updates, including objects an earlier blueprint deploy left behind;
-- waits up to 180 s per app (`WAIT`), then GETs the page through the NodePort and prints the pod and version;
+- runs `kubectl apply`, so it creates **or** updates, including objects an earlier blueprint deploy left behind,
+  and restarts the pods of a Deployment whose ConfigMap changed;
+- waits up to 180 s per Deployment (`WAIT`; the model server's annotation raises it to 25 minutes for the first
+  image pull), then GETs the page through the NodePort and prints the pod and version;
 - on failure prints the pods and their events, and exits 1 so Morpheus marks the run failed;
 - reads the proxy from `/etc/environment` when the SSH session has none, and re-runs itself with `sudo -n` when the
   SSH user cannot read `/etc/kubernetes/admin.conf`.
@@ -204,10 +221,108 @@ push, and run the deploy task again.
 **Pin releases** by tagging: `git tag v1.1.0 && git push --tags`, then set `REF=v1.1.0` in the task. Every run of
 that task deploys exactly that version.
 
+## Private AI Assistant (doc-assistant)
+
+A small language model answers questions about documents, on the cluster's CPUs: no GPU, no outside AI service, and
+no document leaves the cluster. It cites the passages each answer comes from. The built-in knowledge base is this
+playbook, the README and the node-prep guide; a PDF, `.md` or `.txt` dropped on the page is added on the spot.
+
+```
+ browser ──► NodePort 30083 ──► doc-assistant (web, FastAPI)
+                                 1. embed the question      ──► doc-assistant-slm :11434 (ClusterIP)
+                                 2. find the closest passages     Ollama, CPU only
+                                 3. stream the answer + sources   Granite 4.1 3B (chat), Granite Embedding 278M
+```
+
+| Part | Image (built by GitHub Actions) | Size | Resources |
+| --- | --- | --- | --- |
+| Web app | `ghcr.io/sahilanand07/hks-doc-assistant:1.0.0` | ~100 MB | 250m CPU, 256 MiB (limit 2 CPU, 1 GiB) |
+| Model server | `ghcr.io/sahilanand07/hks-slm:1.0.0` | ~2.5 GB | 4 CPU, 6 GiB requested; no CPU limit; 12 GiB memory limit |
+
+**Why these choices.** IBM Granite 4.1 3B and Granite Embedding are Apache 2.0 licensed and made for enterprise
+document Q&A. The models are built into the model-server image, so pods need no internet access, no proxy settings
+and no persistent volume: containerd pulls the image once per node through the node's proxy. The image keeps only
+Ollama's CPU runtime (the official image is 8.5 GB, mostly GPU libraries).
+
+**Deploy it** (pick one):
+
+- **Morpheus task:** run `HKS apps - deploy` with `APP=doc-assistant` (or `APP=all`). The first run waits while the
+  node pulls the 2.5 GB image (up to 25 minutes through the proxy); later runs take seconds.
+- **Morpheus App blueprint:** Spec Template `doc-assistant`, SOURCE Repository, file path
+  `apps/doc-assistant/doc-assistant.yaml`, ref `main`; App blueprint Type Kubernetes, CONFIG TYPE Kubernetes Spec;
+  deploy to RESOURCE POOL `<cluster> / hpe-apps` (steps in *Alternative*). The App appears at once and the
+  model server keeps pulling in the background: watch `kubectl -n hpe-apps get pods -w`.
+- **Catalog:** order *Deploy HKS app* with App `doc-assistant` (see *Self-service catalog*).
+
+**Ready when** `kubectl -n hpe-apps get deploy -l app.kubernetes.io/name=doc-assistant` shows `1/1` for both and the
+page's status reads **ready** (the web app embeds the knowledge base and loads the chat model first, about 30 s).
+
+**Demo script** (10 minutes, browser at `http://<node-ip>:30083/`):
+
+1. **Private AI.** Point at *Runs in your cluster*: the model, the documents and the answers stay on the cluster.
+2. **Ask a built-in question**, e.g. *Why did Calico show "Gateway Timeout"?* The answer streams in, cites `[1]`;
+   click the citation to open the passage. The line under it shows tokens per second and the pod and node.
+3. **Bring your own document.** Drop a customer PDF (a policy, a runbook) and ask about it. Untick *Use documents*
+   to show the bare model.
+4. **Self-healing.** `kubectl -n hpe-apps delete pod -l app.kubernetes.io/component=model-server`: Kubernetes
+   starts a new one in seconds (the image is cached on the node).
+5. **Scale out.** `kubectl -n hpe-apps scale deploy doc-assistant-slm --replicas=3`: the Service spreads questions
+   across model servers on different workers.
+6. **Change from Git.** Change a setting in Git (for example `TOP_K: "6"` in the ConfigMap), push, run the Morpheus
+   task: it applies the ConfigMap and restarts the web pod that uses it, with no downtime.
+
+**Tune it** in the `doc-assistant-config` ConfigMap (`TOP_K`, `NUM_CTX`, `NUM_PREDICT`, `TEMPERATURE`, `NUM_THREAD`),
+push, run the task: `morpheus-deploy.sh` sees the changed ConfigMap and restarts the pods that use it (Kubernetes
+would not on its own). On a 24-vCPU worker expect roughly 10–25 tokens per second per answer; two questions are answered
+at once per model server (`OLLAMA_NUM_PARALLEL`).
+
+**Change the model:** in `images/slm/Dockerfile` set `CHAT_MODEL` (for example `phi4-mini`, `qwen3.5:4b`), bump
+`images/slm/VERSION`, set the same tag and annotation in `doc-assistant.yaml` and `CHAT_MODEL` in its ConfigMap, push.
+The *image-slm* workflow builds and pushes the new image; then run the deploy task.
+
+**Update the app or its documents:** edit `images/doc-assistant/` (or this playbook, which is built in), bump
+`images/doc-assistant/VERSION` and the tag and annotation in the spec, push, wait for *image-doc-assistant*, deploy.
+CI refuses mismatched versions and never overwrites a published version.
+
+Limits worth saying out loud: a 3B model is good at finding and summarising what the documents say, not at long
+reasoning; uploads live in the web pod's memory (one replica) and are gone after a restart; scanned PDFs without a
+text layer are not read.
+
+## Self-service catalog
+
+One catalog tile, *Deploy HKS app*, with an order form for any app and action. Order it from **Provisioning →
+Catalog**; the run's output is in the workflow's execution history.
+
+1. **Inputs.** **Library → Options → Inputs → + ADD**, three times:
+
+| NAME | FIELD NAME | TYPE | Values |
+| --- | --- | --- | --- |
+| HKS app | `hksApp` | Select List | Option List with `all`, `hpe-enterprise`, `hello-world`, `doc-assistant` |
+| Action | `hksAction` | Select List | Option List with `apply`, `status`, `delete` |
+| Git ref | `hksRef` | Text | default `main` |
+
+   Make the option lists first under **Library → Options → Option Lists** (type Manual, one `name,value` per line).
+2. **Task.** Like Phase 2, but CONTENT = `morpheus/catalog-task-script.sh`. It reads the three inputs as plain text
+   (nothing a user types is run) and falls back to `apply`, `all`, `main`.
+3. **Workflow.** Operational Workflow `HKS app - catalog` with that task.
+4. **Catalog item.** **Library → Blueprints → Catalog Items → + ADD → Workflow**: NAME `Deploy HKS app`, the
+   workflow, CONTEXT TYPE None, the three inputs, a logo, ENABLED and FEATURED.
+
+Morpheus 9.1 labels may differ slightly from these 8.x names; the catalog route has not had a lab run yet.
+
+## Next phases
+
+1. **Gateway API.** Install a Gateway API implementation and a Gateway with an IP from `192.168.200.x` (already in
+   NO_PROXY), so apps get host names on port 80 instead of NodePorts.
+2. **Canary release (option 3).** Two versions of an app behind one HTTPRoute with weights (90/10, then 50/50, then
+   100/0), switched from Git and Morpheus; instant rollback by setting the weight back.
+3. **Live platform demo (option 2).** A page that shows which pod and node answered, the version and the replica
+   count, with a load button: scale-out, rolling update and node failure, visible on screen.
+
 ## Teardown
 
-Run `HKS apps - delete` (`ACTION=delete`, `APP=all`). It removes the Deployment, Service and ConfigMap of each app
-by label and leaves the namespace. Check with `kubectl -n hpe-apps get all,cm` (only `kube-root-ca.crt` remains),
+Run `HKS apps - delete` (`ACTION=delete`, `APP=all`). It removes the Deployments, Services and ConfigMaps of each
+app by label and leaves the namespace. Check with `kubectl -n hpe-apps get all,cm` (only `kube-root-ca.crt` remains),
 then optionally `kubectl delete ns hpe-apps`.
 
 Without Morpheus: `kubectl -n hpe-apps delete deploy,svc,cm -l app.kubernetes.io/part-of=hks-morpheus-apps`.
@@ -265,17 +380,20 @@ Morpheus 9.1.0.1 issues found in the lab (worth an HPE ticket, with the applianc
 | `kubectl` says `connection to the server localhost:8080 was refused` | No kubeconfig in that shell | `export KUBECONFIG=/etc/kubernetes/admin.conf` on the master. |
 | `curl` to a node IP hangs on vmemgr | The request went to the internet proxy | Use `curl --noproxy '*'`; `smoke-test.sh` already does. |
 | Page didn't change after a push | Nothing was rolled out yet | Run the deploy task again (Phase 4). |
+| AI assistant: `doc-assistant-slm` `ImagePullBackOff` | Nodes can't pull from `ghcr.io` / `pkg-containers.githubusercontent.com`, or the image isn't built yet | On a worker `sudo crictl pull ghcr.io/sahilanand07/hks-slm:1.0.0`; check the *image-slm* run in GitHub Actions. |
+| AI assistant: model server `Pending`, event `Insufficient memory` / `cpu` | No worker has 6 GiB and 4 CPU free | Free a worker or lower `requests` in the spec (answers get slower). |
+| AI assistant: model server restarts with `OOMKilled` | A long context or many parallel questions | Raise the memory limit, or lower `NUM_CTX` / `OLLAMA_NUM_PARALLEL`. |
+| AI assistant page: status *unreachable* | Web app can't reach `doc-assistant-slm:11434` | `kubectl -n hpe-apps get pods,svc -l app.kubernetes.io/name=doc-assistant`; the model server must be Ready. |
+| AI assistant: answers slow (under 5 tokens/s) | Few free CPUs on that worker, or noisy neighbours | Run it on a quieter worker or scale the model server; set `NUM_THREAD` to the worker's physical cores. |
 | Blueprint App shows Unknown and nothing was deployed | CONFIG TYPE Git Repository (9.1 bug) | Use the task, or the Spec Template blueprint (*Alternative*). |
 | Blueprint redeploy: `already exists` / `provided port is already allocated` | Blueprint deploys only create | Use the task, or delete the objects first (*Alternative*). |
 | Blueprint CONFIG shows `Failed to load remote git config: undefined` | BRANCH OR TAG left empty (Morpheus then asks for `master`) | Type `main`. |
 
 ## Optional extras
 
-- **One task with choices.** Add Morpheus Inputs (for example `hksAction`, `hksApp`) to the workflow or catalog
-  item and set `ACTION=<%=customOptions.hksAction%>` and `APP=<%=customOptions.hksApp%>` in the task instead of
-  fixed values.
+- **One task with choices.** See *Self-service catalog* (`morpheus/catalog-task-script.sh`).
 - **kubectl route (no Morpheus).** `kubectl apply -k .` from the repo root creates `hpe-apps` with Pod Security
-  `restricted` and both apps; `bash scripts/morpheus-deploy.sh apply all` on the master does the same with checks.
+  `restricted` and all three apps; `bash scripts/morpheus-deploy.sh apply all` on the master does the same with checks.
 - **Friendly URL on port 80.** `hks-on-hvm/nginx-proxy-setup.sh` fronts one app per run, for example
   `sudo NODEPORT=30081 APP_HOSTNAME=hpe.hpe.lab WORKER_IPS="192.168.200.49 192.168.200.50 192.168.200.51" bash nginx-proxy-setup.sh`.
 - **GitOps.** For deploy-on-push without anyone running a task, an Argo CD or Flux controller on the cluster can
@@ -291,8 +409,8 @@ Morpheus 9.1.0.1 issues found in the lab (worth an HPE ticket, with the applianc
 | Pod / service CIDR | `172.20.0.0/16` / `172.30.0.0/16` |
 | Internet proxy | `http://192.168.200.250:888` |
 | Namespace | `hpe-apps` |
-| NodePorts | 30081 HPE Enterprise page, 30082 Hello World (30080 = kit validation app) |
-| Image | `nginxinc/nginx-unprivileged:1.27-alpine` |
+| NodePorts | 30081 HPE Enterprise page, 30082 Hello World, 30083 Private AI Assistant (30080 = kit validation app) |
+| Images | `nginxinc/nginx-unprivileged:1.27-alpine`; `ghcr.io/sahilanand07/hks-doc-assistant:1.0.0`, `ghcr.io/sahilanand07/hks-slm:1.0.0` (Ollama 0.40.16, `granite4.1:3b`, `granite-embedding:278m`) |
 | Repository | `https://github.com/sahilanand07/hks-morpheus-apps.git`, branch `main` |
 
 ## What was tested
@@ -312,9 +430,20 @@ Morpheus 9.1.0.1 issues found in the lab (worth an HPE ticket, with the applianc
 - **Pages:** each served by the real image as user 101 with a read-only root filesystem; SSI fills pod, IP, time and
   version; rendered in Chrome on desktop and phone widths.
 
+- **Private AI Assistant** (not yet on the lab cluster): the model-server image built from `images/slm` ran
+  read-only as a non-root user with all capabilities dropped and answered with `granite4.1:3b` at about 5 tokens/s
+  on 2 vCPUs; the web app embedded the three built-in documents (54 passages) in 18 s, answered questions with
+  citations, read an uploaded PDF and answered from it; the page was checked in Chrome on desktop and phone widths;
+  8 app tests run in CI against a stand-in model server; on a v1.35.0 API server the spec passed Pod Security
+  `restricted`, and `morpheus-deploy.sh` applied it, timed out with diagnostics, reported status, restarted only the
+  web pod after a ConfigMap change (not the model server, and not again when a Deployment already rolls) and deleted it.
+- **Catalog task script:** hostile form values (quotes, `$(...)`, backticks) were read as text and replaced by the
+  safe defaults.
+
 ## Sources
 
 - [Tasks — HPE Morpheus Enterprise docs](https://docs.morpheusdata.com/en/latest/library/automation/tasks.html)
 - [Kubernetes Blueprints — HPE Morpheus Enterprise docs 8.0.6](https://docs.morpheusdata.com/en/8.0.6/library/blueprints/appBlueprints/kubernetes.html)
 - [Git integration — HPE Morpheus Enterprise docs 8.0.5](https://docs.morpheusdata.com/en/8.0.5/integration_guides/Deployments/Git.html)
 - [Spec Templates — HPE Morpheus Enterprise docs 8.0.6](https://docs.morpheusdata.com/en/8.0.6/library/templates/specTemplates.html)
+- [GitHub Packages with GitHub Actions — visibility of packages published with GITHUB_TOKEN](https://docs.github.com/en/packages/managing-github-packages-using-github-actions-workflows/publishing-and-installing-a-package-with-github-actions)

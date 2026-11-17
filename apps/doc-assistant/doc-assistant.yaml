@@ -1,0 +1,265 @@
+# ==============================================================================
+# Private AI Assistant - Morpheus Kubernetes spec (one self-contained file)
+#
+# Ask questions about documents; a small language model answers on the cluster's
+# CPUs. No GPU, no outside AI service, no data leaves the cluster.
+#
+#   ConfigMap   doc-assistant-config   models and answer settings for the web app
+#   Deployment  doc-assistant-slm      model server: Ollama + IBM Granite 4.1 3B and
+#                                      Granite Embedding, built into the image
+#   Service     doc-assistant-slm      ClusterIP 11434 (inside the cluster only)
+#   Deployment  doc-assistant          web app: search the documents, stream the answer
+#   Service     doc-assistant          NodePort 30083
+#
+# Images come from GitHub Actions (.github/workflows/images.yml), built from
+# images/slm and images/doc-assistant in this repo and pushed to ghcr.io.
+# The model image is about 2.5 GB: the first start on a node waits for that pull
+# through the proxy (Deployment annotation rollout-timeout below). Later starts take seconds.
+#
+# HPE Morpheus: Shell Script task (PLAYBOOK.md, Phase 2) with APP=doc-assistant, or a
+# Spec Template with SPEC PATH apps/doc-assistant/doc-assistant.yaml in an App blueprint.
+# kubectl:  kubectl apply -k .     Test: http://<any-node-ip>:30083/
+#
+# Sizing: the model server asks for 4 CPU and 6 GiB and uses more CPU when it is free
+# (no CPU limit, so answers are as fast as the node allows). 1 replica answers about
+# 2 questions at a time; scale it for more users.
+# To publish a change: bump images/<image>/VERSION, the image tag and the
+# hks-morpheus-apps/version annotation below (CI checks they match), push.
+# No dollar signs and no Morpheus template tags anywhere in this file.
+# ==============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doc-assistant-config
+  labels:
+    app.kubernetes.io/name: doc-assistant
+    app.kubernetes.io/part-of: hks-morpheus-apps
+data:
+  OLLAMA_URL: "http://doc-assistant-slm:11434"
+  CHAT_MODEL: "granite4.1:3b"
+  EMBED_MODEL: "granite-embedding:278m"
+  TOP_K: "4"                 # passages given to the model per question
+  NUM_CTX: "8192"            # context window, tokens
+  NUM_PREDICT: "768"         # longest answer, tokens
+  TEMPERATURE: "0.2"
+  NUM_THREAD: "0"            # CPU threads per answer, 0 = Ollama decides
+  MAX_UPLOAD_MB: "20"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doc-assistant-slm
+  labels:
+    app.kubernetes.io/name: doc-assistant
+    app.kubernetes.io/component: model-server
+    app.kubernetes.io/part-of: hks-morpheus-apps
+  annotations:
+    # morpheus-deploy.sh waits this long for the first rollout (image pull through the proxy).
+    hks-morpheus-apps/rollout-timeout: "1500"
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: doc-assistant
+      app.kubernetes.io/component: model-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: doc-assistant
+        app.kubernetes.io/component: model-server
+        app.kubernetes.io/part-of: hks-morpheus-apps
+      annotations:
+        hks-morpheus-apps/version: "1.0.0"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: doc-assistant
+              app.kubernetes.io/component: model-server
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10002
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ollama
+          image: ghcr.io/sahilanand07/hks-slm:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: api
+              containerPort: 11434
+          env:
+            - name: OLLAMA_NUM_PARALLEL
+              value: "2"
+            - name: OLLAMA_MAX_QUEUE
+              value: "32"
+          readinessProbe:
+            httpGet:
+              path: /api/version
+              port: api
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/version
+              port: api
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "4"
+              memory: 6Gi
+            limits:
+              memory: 12Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doc-assistant-slm
+  labels:
+    app.kubernetes.io/name: doc-assistant
+    app.kubernetes.io/component: model-server
+    app.kubernetes.io/part-of: hks-morpheus-apps
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: doc-assistant
+    app.kubernetes.io/component: model-server
+  ports:
+    - name: api
+      port: 11434
+      targetPort: api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doc-assistant
+  labels:
+    app.kubernetes.io/name: doc-assistant
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: hks-morpheus-apps
+  annotations:
+    hks-morpheus-apps/rollout-timeout: "600"
+spec:
+  # One replica: uploaded documents live in the pod's memory. The built-in
+  # documents work with any number of replicas.
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: doc-assistant
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: doc-assistant
+        app.kubernetes.io/component: web
+        app.kubernetes.io/part-of: hks-morpheus-apps
+      annotations:
+        hks-morpheus-apps/version: "1.0.0"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: ghcr.io/sahilanand07/hks-doc-assistant:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: doc-assistant-config
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doc-assistant
+  labels:
+    app.kubernetes.io/name: doc-assistant
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: hks-morpheus-apps
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: doc-assistant
+    app.kubernetes.io/component: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30083

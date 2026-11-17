@@ -1,0 +1,81 @@
+# Builds the Private AI Assistant web app image
+# from images/doc-assistant/ and pushes it to ghcr.io/<owner>/hks-doc-assistant:<images/doc-assistant/VERSION>.
+# The package takes the repository's visibility (public repo = public image, so the
+# cluster pulls it without credentials).
+#
+# A VERSION that is already in the registry is never overwritten: the build is
+# then pushed only as sha-<commit>. Bump images/doc-assistant/VERSION (and the tag in
+# apps/doc-assistant/doc-assistant.yaml) to publish a new version. The built-in
+# knowledge (PLAYBOOK.md, README.md) is copied in at build time, so doc changes
+# reach the app with the next version.
+name: image-doc-assistant
+
+on:
+  push:
+    paths:
+      - "images/doc-assistant/**"
+      - ".github/workflows/image-doc-assistant.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Test the app (stand-in model server, no downloads)
+        run: |
+          python -m pip install --quiet -r images/doc-assistant/requirements.txt pytest
+          python -m pytest -q images/doc-assistant/tests
+
+      - name: Image name and version
+        id: v
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          version="$(tr -d '[:space:]' < images/doc-assistant/VERSION)"
+          image="ghcr.io/$owner/hks-doc-assistant"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Is this version already published?
+        id: exists
+        run: |
+          if docker buildx imagetools inspect "${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }}" >/dev/null 2>&1; then
+            echo "tags=${{ steps.v.outputs.image }}:sha-${{ steps.v.outputs.short }}" >> "$GITHUB_OUTPUT"
+            echo "::warning::${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }} already exists and is kept. Bump images/doc-assistant/VERSION to publish this build under a new version."
+          else
+            echo "tags=${{ steps.v.outputs.image }}:${{ steps.v.outputs.version }},${{ steps.v.outputs.image }}:sha-${{ steps.v.outputs.short }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/doc-assistant/Dockerfile
+          push: true
+          provenance: false
+          tags: ${{ steps.exists.outputs.tags }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### hks-doc-assistant"
+            echo
+            echo "Pushed: ${{ steps.exists.outputs.tags }}"
+          } >> "$GITHUB_STEP_SUMMARY"
