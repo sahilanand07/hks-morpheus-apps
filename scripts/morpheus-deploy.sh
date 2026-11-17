@@ -8,15 +8,17 @@
 # task output shows every step, and the exit code fails the task when the
 # rollout fails. Works from any shell that has kubectl and cluster-admin.
 #
-#   morpheus-deploy.sh apply  [all|hpe-enterprise|hello-world]   create or update (rolling, no downtime)
-#   morpheus-deploy.sh status [all|hpe-enterprise|hello-world]   readiness, version, URL
-#   morpheus-deploy.sh delete [all|hpe-enterprise|hello-world]   remove the app's objects
+#   morpheus-deploy.sh apply  [all|<app>]   create or update (rolling, no downtime)
+#   morpheus-deploy.sh status [all|<app>]   readiness, version, URL
+#   morpheus-deploy.sh delete [all|<app>]   remove the app's objects
+#   <app> = hpe-enterprise | hello-world | doc-assistant (Private AI Assistant)
 #
 # Specs come from the checkout this script sits in or, when it runs on its own
 # (piped, or as a Morpheus Repository-sourced task), from a shallow clone of
 # REPO_URL at REF.
 #
-# Env: NAMESPACE (hpe-apps)  REF (main)  REPO_URL  WAIT (rollout timeout in s, 180; 0 = don't wait)
+# Env: NAMESPACE (hpe-apps)  REF (main)  REPO_URL  WAIT (rollout timeout in s, 180; 0 = don't wait;
+#      a Deployment's hks-morpheus-apps/rollout-timeout annotation can raise it, e.g. for a big image)
 #      KUBECONFIG (default: /etc/kubernetes/admin.conf, else ~/.kube/config)
 #      PROXY_ENV_FILE (/etc/environment: read for *_proxy when the session has none)
 # Not root and admin.conf unreadable? It re-runs itself with "sudo -n".
@@ -31,7 +33,7 @@ REF="${REF:-main}"
 REPO_URL="${REPO_URL:-https://github.com/sahilanand07/hks-morpheus-apps.git}"
 WAIT="${WAIT:-180}"
 PROXY_ENV_FILE="${PROXY_ENV_FILE:-/etc/environment}"
-ALL_APPS="hpe-enterprise hello-world"
+ALL_APPS="hpe-enterprise hello-world doc-assistant"
 LABEL_PART_OF="app.kubernetes.io/part-of=hks-morpheus-apps"
 
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -125,10 +127,28 @@ show_failure() {   # diagnostics for a rollout that did not finish
   kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp 2>/dev/null | grep -E "$app" | tail -8 | indent
 }
 
+deployments_of() {   # the app's Deployments, by label (an app can have more than one)
+  kubectl -n "$NAMESPACE" get deploy -l "app.kubernetes.io/name=$1,$LABEL_PART_OF" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null
+}
+
+restart_for_config() {   # a changed ConfigMap alone does not restart pods: restart the Deployments that use it
+  local app=$1 out=$2 cm d refs
+  while read -r cm; do
+    [[ -n "$cm" ]] || continue
+    while read -r d refs; do
+      [[ -n "$d" && " $refs " == *" $cm "* ]] || continue
+      grep -q "^deployment.apps/$d configured" <<<"$out" && continue   # already rolling
+      log "  $d: ConfigMap $cm changed, restarting its pods (rolling)"
+      kubectl -n "$NAMESPACE" rollout restart "deploy/$d" | indent
+    done < <(kubectl -n "$NAMESPACE" get deploy -l "app.kubernetes.io/name=$app,$LABEL_PART_OF" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.template.spec.containers[*].envFrom[*].configMapRef.name}{" "}{.spec.template.spec.volumes[*].configMap.name}{"\n"}{end}' 2>/dev/null)
+  done < <(sed -n 's#^configmap/\([^ ]*\) configured#\1#p' <<<"$out")
+}
+
 apply_app() {
-  local app=$1 file="$SRC_DIR/apps/$1/$1.yaml" version out port
+  local app=$1 file="$SRC_DIR/apps/$1/$1.yaml" version out port d t wait_s
   [[ -f "$file" ]] || { log "FAIL $app: $file not found"; return 1; }
-  version="$(sed -n 's/.*hks-morpheus-apps\/version: "\([^"]*\)".*/\1/p' "$file" | head -1)"
+  version="$(sed -n 's/.*hks-morpheus-apps\/version: "\([^"]*\)".*/\1/p' "$file" | sort -u | paste -sd/ -)"
   log "$app: applying version ${version:-?} (commit $COMMIT) to namespace $NAMESPACE"
   if ! out="$(kubectl -n "$NAMESPACE" apply -f "$file" 2>&1)"; then
     indent <<<"$out"
@@ -136,14 +156,21 @@ apply_app() {
     return 1
   fi
   indent <<<"$out"
+  restart_for_config "$app" "$out"
   if (( WAIT > 0 )); then
-    if ! out="$(kubectl -n "$NAMESPACE" rollout status "deploy/$app" --timeout="${WAIT}s" 2>&1)"; then
-      indent <<<"$out"
-      log "FAIL $app: not ready after ${WAIT}s"
-      show_failure "$app"
-      return 1
-    fi
-    log "  $app: rollout complete"
+    for d in $(deployments_of "$app"); do
+      t="$(kubectl -n "$NAMESPACE" get deploy "$d" -o jsonpath='{.metadata.annotations.hks-morpheus-apps/rollout-timeout}' 2>/dev/null)"
+      wait_s=$WAIT
+      [[ "$t" =~ ^[0-9]+$ ]] && (( t > wait_s )) && wait_s=$t
+      (( wait_s > WAIT )) && log "  $d: waiting up to ${wait_s}s (a large image takes a while the first time a node pulls it)"
+      if ! out="$(kubectl -n "$NAMESPACE" rollout status "deploy/$d" --timeout="${wait_s}s" 2>&1)"; then
+        indent <<<"$out"
+        log "FAIL $app: $d not ready after ${wait_s}s"
+        show_failure "$app"
+        return 1
+      fi
+      log "  $d: rollout complete"
+    done
     port="$(kubectl -n "$NAMESPACE" get svc "$app" -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)"
     http_check "$app" "$port" || return 1
   fi
@@ -151,25 +178,30 @@ apply_app() {
 }
 
 status_app() {
-  local app=$1 ready want version port
-  if ! kubectl -n "$NAMESPACE" get deploy "$app" >/dev/null 2>&1; then
+  local app=$1 ready want version port d deps notready=0
+  deps="$(deployments_of "$app")"
+  if [[ -z "$deps" ]]; then
     log "MISSING $app: no Deployment in namespace $NAMESPACE"
     return 1
   fi
-  ready="$(kubectl -n "$NAMESPACE" get deploy "$app" -o jsonpath='{.status.readyReplicas}')"
-  want="$(kubectl -n "$NAMESPACE" get deploy "$app" -o jsonpath='{.spec.replicas}')"
-  version="$(kubectl -n "$NAMESPACE" get deploy "$app" -o jsonpath='{.spec.template.metadata.annotations.hks-morpheus-apps/version}')"
   port="$(kubectl -n "$NAMESPACE" get svc "$app" -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)"
-  log "$app: ${ready:-0}/$want ready, version ${version:-?}, NodePort ${port:-none}"
+  for d in $deps; do
+    ready="$(kubectl -n "$NAMESPACE" get deploy "$d" -o jsonpath='{.status.readyReplicas}')"
+    want="$(kubectl -n "$NAMESPACE" get deploy "$d" -o jsonpath='{.spec.replicas}')"
+    version="$(kubectl -n "$NAMESPACE" get deploy "$d" -o jsonpath='{.spec.template.metadata.annotations.hks-morpheus-apps/version}')"
+    log "$d: ${ready:-0}/$want ready, version ${version:-?}"
+    [[ "${ready:-0}" == "$want" ]] || notready=1
+  done
+  log "$app: NodePort ${port:-none}"
   kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=$app" -o wide 2>&1 | indent
-  [[ "${ready:-0}" == "$want" ]] || { log "NOT READY $app"; return 1; }
+  (( notready )) && { log "NOT READY $app"; return 1; }
   http_check "$app" "$port" || return 1
   log "OK   $app"
 }
 
 delete_app() {
   local app=$1 out
-  log "$app: deleting Deployment, Service and ConfigMap in namespace $NAMESPACE"
+  log "$app: deleting its Deployments, Services and ConfigMaps in namespace $NAMESPACE"
   if ! out="$(kubectl -n "$NAMESPACE" delete deploy,svc,cm -l "app.kubernetes.io/name=$app,$LABEL_PART_OF" --ignore-not-found 2>&1)"; then
     indent <<<"$out"
     log "FAIL $app: delete failed"
@@ -197,7 +229,10 @@ done
 
 if [[ "$ACTION" == "apply" || "$ACTION" == "status" ]]; then
   ips="$(node_ips)"
-  [[ -n "$ips" ]] && log "open on any node: ${ips% }  (hpe-enterprise :30081, hello-world :30082)"
+  ports="$(kubectl -n "$NAMESPACE" get svc -l "$LABEL_PART_OF" \
+    -o jsonpath='{range .items[?(@.spec.type=="NodePort")]}{.metadata.name} :{.spec.ports[0].nodePort}{"\n"}{end}' 2>/dev/null \
+    | paste -sd, - | sed 's/,/, /g')"
+  [[ -n "$ips" ]] && log "open on any node: ${ips% }  (${ports:-no NodePorts yet})"
 fi
 if (( failed )); then
   log "RESULT: FAILED ($failed app(s))"

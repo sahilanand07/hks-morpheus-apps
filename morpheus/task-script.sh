@@ -5,9 +5,11 @@
 #
 # One task per action is simplest: copy the task and change ACTION / APP / REF.
 #   ACTION  apply | status | delete
-#   APP     all | hpe-enterprise | hello-world
+#   APP     all | hpe-enterprise | hello-world | doc-assistant (Private AI Assistant)
 #   REF     branch or tag of the repo to deploy (main, or a release tag such as v1.1.0)
 # The task fails (non-zero exit) when the deploy or the check fails.
+# doc-assistant: the first deploy waits up to 25 min while each node pulls the 2.5 GB model image.
+# For a self-service catalog item with choices, use morpheus/catalog-task-script.sh instead.
 # ==============================================================================
 ACTION=apply
 APP=all
